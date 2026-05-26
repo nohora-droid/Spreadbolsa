@@ -8,7 +8,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from data_loader import load_metabase_sql
+from data_loader import load_metabase_card_rango, load_metabase_sql
 
 # Columnas horarias esperadas en el formato ancho de Metabase
 COLUMNAS_HORARIAS = [f"H{i}" for i in range(1, 25)]
@@ -43,6 +43,34 @@ def _generar_rangos_mensuales(fecha_inicio: str, fecha_fin: str) -> list[tuple[s
         rangos.append(
             (chunk_inicio.strftime("%Y-%m-%d"), chunk_fin.strftime("%Y-%m-%d"))
         )
+
+    return rangos
+
+
+def _generar_rangos_anuales(fecha_inicio: str, fecha_fin: str) -> list[tuple[str, str]]:
+    """
+    Divide un rango de fechas en sub-rangos por año calendario.
+
+    El primer y último chunk respetan fecha_inicio y fecha_fin del rango total.
+    Ejemplo: 2024-06-01 a 2026-02-10 → 2024 parcial, 2025 completo, 2026 parcial.
+    """
+    inicio = pd.Timestamp(fecha_inicio)
+    fin = pd.Timestamp(fecha_fin)
+
+    anios = range(int(inicio.year), int(fin.year) + 1)
+    rangos: list[tuple[str, str]] = []
+
+    for anio in anios:
+        anio_inicio = pd.Timestamp(year=anio, month=1, day=1)
+        anio_fin = pd.Timestamp(year=anio, month=12, day=31)
+
+        chunk_inicio = max(inicio, anio_inicio)
+        chunk_fin = min(fin, anio_fin)
+
+        if chunk_inicio <= chunk_fin:
+            rangos.append(
+                (chunk_inicio.strftime("%Y-%m-%d"), chunk_fin.strftime("%Y-%m-%d"))
+            )
 
     return rangos
 
@@ -188,6 +216,94 @@ def cargar_pb_sql(
     )
 
     return df_resultado
+
+
+def cargar_pb_historico(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """
+    Carga el histórico de precios de bolsa (PB) desde la card 1240 de Metabase
+    usando un rango de fechas, dividido en chunks ANUALES.
+
+    La card 1240 retorna formato ancho:
+        file_date, version_file, H1, H2, ... H24
+
+    Este método transforma el resultado a formato largo:
+        fecha, hora (1-24), precio_bolsa
+    """
+    # Validar formato de fechas
+    for etiqueta, fecha in (("fecha_inicio", fecha_inicio), ("fecha_fin", fecha_fin)):
+        try:
+            datetime.strptime(fecha, "%Y-%m-%d")
+        except ValueError as error:
+            mensaje = (
+                f"{etiqueta} debe tener formato YYYY-MM-DD (ej. 2024-01-15). "
+                f"Valor recibido: {fecha!r}"
+            )
+            print(f"Error al cargar PB histórico: {mensaje}")
+            raise ValueError(mensaje) from error
+
+    if fecha_inicio > fecha_fin:
+        mensaje = "fecha_inicio no puede ser posterior a fecha_fin."
+        print(f"Error al cargar PB histórico: {mensaje}")
+        raise ValueError(mensaje)
+
+    rangos_anuales = _generar_rangos_anuales(fecha_inicio, fecha_fin)
+    print(
+        f"Cargando PB histórico en {len(rangos_anuales)} chunk(s) anual(es) "
+        f"({fecha_inicio} a {fecha_fin}, card_id=1240)."
+    )
+
+    chunks: list[pd.DataFrame] = []
+
+    for indice, (chunk_inicio, chunk_fin) in enumerate(rangos_anuales, start=1):
+        print(f"  Chunk {indice}/{len(rangos_anuales)}: {chunk_inicio} a {chunk_fin}")
+
+        # Consultar la card 1240 con rango de fechas
+        df_ancho = load_metabase_card_rango(1240, chunk_inicio, chunk_fin)
+
+        if df_ancho.empty:
+            print(f"  Chunk {chunk_inicio} a {chunk_fin}: sin filas.")
+            continue
+
+        # Validar columnas esperadas del formato ancho
+        columnas_requeridas = {"file_date", "version_file", *COLUMNAS_HORARIAS}
+        faltantes = columnas_requeridas - set(df_ancho.columns)
+        if faltantes:
+            raise ValueError(
+                "La card 1240 no devolvió las columnas esperadas. "
+                f"Faltantes: {sorted(faltantes)}. Recibidas: {list(df_ancho.columns)}"
+            )
+
+        # Transformación a formato largo (una fila por fecha-hora)
+        df_trabajo = df_ancho.copy()
+        df_trabajo["fecha"] = pd.to_datetime(
+            df_trabajo["file_date"], utc=True, errors="coerce"
+        ).dt.strftime("%Y-%m-%d")
+
+        df_largo = df_trabajo.melt(
+            id_vars=["fecha"],
+            value_vars=COLUMNAS_HORARIAS,
+            var_name="columna_hora",
+            value_name="precio_bolsa",
+        )
+
+        df_largo["hora"] = df_largo["columna_hora"].str.extract(r"H(\d+)").astype(int)
+        df_largo = df_largo.drop(columns=["columna_hora"])
+        df_largo["precio_bolsa"] = pd.to_numeric(df_largo["precio_bolsa"], errors="coerce")
+
+        chunks.append(df_largo[["fecha", "hora", "precio_bolsa"]])
+        print(f"  Chunk {chunk_inicio} a {chunk_fin}: {len(df_largo)} filas (largo).")
+
+    if not chunks:
+        print(
+            f"No se cargaron filas de PB histórico para el rango {fecha_inicio} a {fecha_fin}."
+        )
+        return pd.DataFrame(columns=["fecha", "hora", "precio_bolsa"])
+
+    df_total = pd.concat(chunks, ignore_index=True)
+    df_total = df_total.sort_values(["fecha", "hora"]).reset_index(drop=True)
+
+    print(f"Total cargado PB histórico: {len(df_total)} filas.")
+    return df_total
 
 
 def transformar_pb(df: pd.DataFrame) -> pd.DataFrame:
