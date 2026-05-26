@@ -237,12 +237,19 @@ function pbPromedioPorHoraMes(
   })
 }
 
-function claseSpread(spread: number | null): string {
+function claseSpread(
+  spread: number | null,
+  posicion: 'vendedor' | 'comprador',
+): string {
   if (spread === null) return 'text-gray-500'
-  return spread < 0 ? 'text-red-400' : 'text-emerald-400'
+  if (posicion === 'vendedor') {
+    return spread < 0 ? 'text-red-400' : 'text-emerald-400'
+  }
+  return spread > 0 ? 'text-red-400' : 'text-emerald-400'
 }
 
 function App() {
+  const [posicion, setPosicion] = useState<'vendedor' | 'comprador'>('vendedor')
   const [precioContrato, setPrecioContrato] = useState(350)
   const [fechaInicio, setFechaInicio] = useState('2026-01-01')
   const [fechaFin, setFechaFin] = useState(
@@ -259,8 +266,42 @@ function App() {
   const [mesSeleccionado, setMesSeleccionado] = useState('')
   const [mesesComparativo, setMesesComparativo] = useState<string[]>([])
 
-  const fechasDisponibles = useMemo(() => fechasUnicas(datos), [datos])
-  const mesesDisponibles = useMemo(() => mesesUnicos(datos), [datos])
+  const datosConSpread = useMemo(() => {
+    return datos.map((d) => ({
+      ...d,
+      spread:
+        posicion === 'vendedor'
+          ? precioContrato - d.precio_bolsa
+          : d.precio_bolsa - precioContrato,
+    }))
+  }, [datos, posicion, precioContrato])
+
+  const resumenLocal = useMemo(() => {
+    if (datosConSpread.length === 0) return null
+    const spreads = datosConSpread.map((d) => d.spread)
+    const spread_promedio =
+      spreads.reduce((s, v) => s + v, 0) / spreads.length
+    const horasCriticas =
+      posicion === 'vendedor'
+        ? spreads.filter((s) => s < 0).length
+        : spreads.filter((s) => s > 0).length
+    return {
+      spread_promedio,
+      spread_minimo: Math.min(...spreads),
+      spread_maximo: Math.max(...spreads),
+      horas_criticas: horasCriticas,
+      porcentaje_critico: (horasCriticas / spreads.length) * 100,
+    }
+  }, [datosConSpread, posicion])
+
+  const fechasDisponibles = useMemo(
+    () => fechasUnicas(datosConSpread),
+    [datosConSpread],
+  )
+  const mesesDisponibles = useMemo(
+    () => mesesUnicos(datosConSpread),
+    [datosConSpread],
+  )
 
   useEffect(() => {
     if (fechasDisponibles.length === 0) return
@@ -358,7 +399,7 @@ function App() {
     () =>
       Array.from({ length: 24 }, (_, i) => {
         const hora = i + 1
-        const filas = datos.filter((d) => d.hora === hora)
+        const filas = datosConSpread.filter((d) => d.hora === hora)
         const avg_pb =
           filas.length > 0
             ? filas.reduce((s, d) => s + d.precio_bolsa, 0) / filas.length
@@ -374,17 +415,18 @@ function App() {
           precio_contrato: precioContrato,
         }
       }),
-    [datos, precioContrato],
+    [datosConSpread, precioContrato],
   )
 
   const filasDia = useMemo(
-    () => filasPorHoraDelDia(datos, fechaSeleccionada, precioContrato),
-    [datos, fechaSeleccionada, precioContrato],
+    () =>
+      filasPorHoraDelDia(datosConSpread, fechaSeleccionada, precioContrato),
+    [datosConSpread, fechaSeleccionada, precioContrato],
   )
 
   const filasMes = useMemo(
-    () => filasPromedioMes(datos, mesSeleccionado, precioContrato),
-    [datos, mesSeleccionado, precioContrato],
+    () => filasPromedioMes(datosConSpread, mesSeleccionado, precioContrato),
+    [datosConSpread, mesSeleccionado, precioContrato],
   )
 
   const resumenDia = useMemo(() => {
@@ -396,19 +438,25 @@ function App() {
     const valle = conDatos.reduce((a, b) =>
       (a.precio_bolsa ?? Infinity) <= (b.precio_bolsa ?? Infinity) ? a : b,
     )
-    const horasNegativas = conDatos.filter(
-      (f) => f.spread !== null && f.spread < 0,
-    ).length
-    return { pico, valle, horasNegativas }
-  }, [filasDia])
+    const horasCriticas = conDatos.filter((f) => {
+      if (f.spread === null) return false
+      return posicion === 'vendedor' ? f.spread < 0 : f.spread > 0
+    }).length
+    return { pico, valle, horasCriticas }
+  }, [filasDia, posicion])
 
   const resumenMes = useMemo(() => {
-    const delMes = datos.filter((d) => mesDeFecha(d.fecha) === mesSeleccionado)
+    const delMes = datosConSpread.filter(
+      (d) => mesDeFecha(d.fecha) === mesSeleccionado,
+    )
     if (delMes.length === 0) return null
     const spreadPromedio =
       delMes.reduce((s, d) => s + d.spread, 0) / delMes.length
-    const negativas = delMes.filter((d) => d.spread < 0).length
-    const pctNegativo = (negativas / delMes.length) * 100
+    const criticas =
+      posicion === 'vendedor'
+        ? delMes.filter((d) => d.spread < 0).length
+        : delMes.filter((d) => d.spread > 0).length
+    const pctCritico = (criticas / delMes.length) * 100
     const filasHora = filasMes.filter((f) => f.precio_bolsa !== null)
     const horaMasCara =
       filasHora.length > 0
@@ -416,22 +464,39 @@ function App() {
             (a.precio_bolsa ?? 0) >= (b.precio_bolsa ?? 0) ? a : b,
           )
         : null
-    return { spreadPromedio, pctNegativo, horaMasCara }
-  }, [datos, mesSeleccionado, filasMes])
+    return { spreadPromedio, pctCritico, horaMasCara }
+  }, [datosConSpread, mesSeleccionado, filasMes, posicion])
 
   const hayDatosFecha =
     fechaSeleccionada !== '' &&
-    datos.some((d) => normalizarFecha(d.fecha) === fechaSeleccionada)
+    datosConSpread.some(
+      (d) => normalizarFecha(d.fecha) === fechaSeleccionada,
+    )
 
   const hayDatosMes =
     mesSeleccionado !== '' &&
-    datos.some((d) => mesDeFecha(d.fecha) === mesSeleccionado)
+    datosConSpread.some((d) => mesDeFecha(d.fecha) === mesSeleccionado)
 
   const seriesComparativo = useMemo(
     () =>
-      mesesComparativo.map((mes) => pbPromedioPorHoraMes(datos, mes)),
-    [datos, mesesComparativo],
+      mesesComparativo.map((mes) =>
+        pbPromedioPorHoraMes(datosConSpread, mes),
+      ),
+    [datosConSpread, mesesComparativo],
   )
+
+  const labelPromedio =
+    posicion === 'vendedor' ? 'Spread promedio' : 'Exposición promedio'
+  const labelHorasCriticas =
+    posicion === 'vendedor' ? 'Horas en riesgo' : 'Horas caras'
+  const labelHorasDia =
+    posicion === 'vendedor' ? 'Horas en riesgo del día' : 'Horas caras del día'
+  const labelPctMes =
+    posicion === 'vendedor' ? '% horas en riesgo' : '% horas caras'
+  const labelSpreadMes =
+    posicion === 'vendedor'
+      ? 'Spread promedio del mes'
+      : 'Exposición promedio del mes'
 
   if (cargando) {
     return (
@@ -495,6 +560,32 @@ function App() {
                 className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 outline-none ring-emerald-500/0 transition focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
               />
             </div>
+            <div className="flex flex-col gap-2">
+              <span className="text-sm font-medium text-gray-300">
+                Posición
+              </span>
+              <div className="inline-flex gap-1 rounded-full p-1">
+                {(
+                  [
+                    ['vendedor', 'Vendedor'],
+                    ['comprador', 'Comprador'],
+                  ] as const
+                ).map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setPosicion(id)}
+                    className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                      posicion === id
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="flex min-w-[160px] flex-col gap-2">
               <label
                 htmlFor="fecha-inicio"
@@ -543,24 +634,38 @@ function App() {
 
         <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <MetricCard
-            label="Spread Promedio"
-            value={formatNumero(resumen.spread_promedio)}
+            label={labelPromedio}
+            value={
+              resumenLocal
+                ? formatNumero(resumenLocal.spread_promedio)
+                : '—'
+            }
             accent="text-white"
           />
           <MetricCard
-            label="Spread Mínimo"
-            value={formatNumero(resumen.spread_minimo)}
+            label="Spread mínimo"
+            value={
+              resumenLocal ? formatNumero(resumenLocal.spread_minimo) : '—'
+            }
             accent="text-sky-400"
           />
           <MetricCard
-            label="Spread Máximo"
-            value={formatNumero(resumen.spread_maximo)}
+            label="Spread máximo"
+            value={
+              resumenLocal ? formatNumero(resumenLocal.spread_maximo) : '—'
+            }
             accent="text-emerald-400"
           />
           <MetricCard
-            label="Horas Negativas"
-            value={`${resumen.horas_negativas}`}
-            subValue={`${formatNumero(resumen.porcentaje_negativo)}%`}
+            label={labelHorasCriticas}
+            value={
+              resumenLocal ? `${resumenLocal.horas_criticas}` : '—'
+            }
+            subValue={
+              resumenLocal
+                ? `${formatNumero(resumenLocal.porcentaje_critico)}%`
+                : undefined
+            }
             accent="text-amber-400"
           />
         </section>
@@ -626,7 +731,7 @@ function App() {
                 <Line
                   type="monotone"
                   dataKey="spread"
-                  name="Spread promedio"
+                  name={labelPromedio}
                   stroke="#22c55e"
                   strokeWidth={2}
                   dot={false}
@@ -736,7 +841,7 @@ function App() {
                             {formatNumero(f.precio_contrato)}
                           </td>
                           <td
-                            className={`px-4 py-2.5 text-right font-medium tabular-nums ${claseSpread(f.spread)}`}
+                            className={`px-4 py-2.5 text-right font-medium tabular-nums ${claseSpread(f.spread, posicion)}`}
                           >
                             {f.spread !== null ? formatNumero(f.spread) : '—'}
                           </td>
@@ -755,8 +860,8 @@ function App() {
                             value: `H${resumenDia.valle.hora} — ${formatNumero(resumenDia.valle.precio_bolsa!)}`,
                           },
                           {
-                            label: 'Horas negativas del día',
-                            value: String(resumenDia.horasNegativas),
+                            label: labelHorasDia,
+                            value: String(resumenDia.horasCriticas),
                             accent: 'text-amber-400',
                           },
                         ]}
@@ -823,7 +928,7 @@ function App() {
                             {formatNumero(f.precio_contrato)}
                           </td>
                           <td
-                            className={`px-4 py-2.5 text-right font-medium tabular-nums ${claseSpread(f.spread)}`}
+                            className={`px-4 py-2.5 text-right font-medium tabular-nums ${claseSpread(f.spread, posicion)}`}
                           >
                             {f.spread !== null ? formatNumero(f.spread) : '—'}
                           </td>
@@ -847,12 +952,12 @@ function App() {
                       <ResumenBloque
                         items={[
                           {
-                            label: 'Spread promedio del mes',
+                            label: labelSpreadMes,
                             value: formatNumero(resumenMes.spreadPromedio),
                           },
                           {
-                            label: '% horas negativas',
-                            value: `${formatNumero(resumenMes.pctNegativo)}%`,
+                            label: labelPctMes,
+                            value: `${formatNumero(resumenMes.pctCritico)}%`,
                             accent: 'text-amber-400',
                           },
                           {
