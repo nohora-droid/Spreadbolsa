@@ -469,10 +469,12 @@ function App() {
   const [simContraparte, setSimContraparte] = useState('')
   const [simEnergiaMwh, setSimEnergiaMwh] = useState(1000)
   const [simPrecio, setSimPrecio] = useState(350)
-  const [simFechaInicio, setSimFechaInicio] = useState('2026-01-01')
-  const [simFechaFin, setSimFechaFin] = useState(
-    () => new Date().toISOString().split('T')[0],
-  )
+  // Estado A — Período del PB histórico (fuente de datos de bolsa)
+  const [pbDesde, setPbDesde] = useState('2026-01-01')
+  const [pbHasta, setPbHasta] = useState('2026-12-31')
+  // Estado C — Vigencia del nuevo contrato simulado
+  const [contratoInicio, setContratoInicio] = useState('2026-01-01')
+  const [contratoFin, setContratoFin] = useState('2026-12-31')
   const [simTipoMercado, setSimTipoMercado] = useState<SimMercado>('regulado')
   const [simPerfilTipo, setSimPerfilTipo] = useState<SimPerfilTipo>('plano')
   const [simBloques, setSimBloques] = useState<SimBloque[]>([
@@ -661,13 +663,13 @@ function App() {
     return () => controller.abort()
   }, [tabActiva])
 
-  // Auto-fill dates when ENSO option changes
+  // Auto-fill del período de PB cuando se elige un escenario ENSO
   useEffect(() => {
     if (simFuentePB !== 'enso') return
     const enso = ENSO_OPCIONES.find((e) => e.key === simEnso)
     if (enso) {
-      setSimFechaInicio(enso.inicio)
-      setSimFechaFin(enso.fin)
+      setPbDesde(enso.inicio)
+      setPbHasta(enso.fin)
     }
   }, [simFuentePB, simEnso])
 
@@ -770,8 +772,9 @@ function App() {
         tipo: simTipo,
         contraparte: simContraparte,
         precio_cop_kwh: simPrecio,
-        fecha_inicio: simFechaInicio,
-        fecha_fin: simFechaFin,
+        // fecha_inicio/fin = período PB histórico (es lo que va a Metabase)
+        fecha_inicio: pbDesde,
+        fecha_fin: pbHasta,
         tipo_mercado: simTipoMercado,
         perfil_horario: simPerfilTipo === 'excel' ? 'excel' : simPerfilTipo,
       }
@@ -2165,8 +2168,8 @@ function App() {
                         <input
                           type="date"
                           min="2010-01-01"
-                          value={simFechaInicio}
-                          onChange={(e) => setSimFechaInicio(e.target.value)}
+                          value={pbDesde}
+                          onChange={(e) => setPbDesde(e.target.value)}
                           className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
                         />
                       </div>
@@ -2174,8 +2177,8 @@ function App() {
                         <label className="mb-1 block text-xs text-gray-500">Hasta</label>
                         <input
                           type="date"
-                          value={simFechaFin}
-                          onChange={(e) => setSimFechaFin(e.target.value)}
+                          value={pbHasta}
+                          onChange={(e) => setPbHasta(e.target.value)}
                           className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
                         />
                       </div>
@@ -2444,9 +2447,8 @@ function App() {
                       <label className="mb-1 block text-xs text-gray-500">Inicio vigencia</label>
                       <input
                         type="date"
-                        min="2010-01-01"
-                        value={simFechaInicio}
-                        onChange={(e) => setSimFechaInicio(e.target.value)}
+                        value={contratoInicio}
+                        onChange={(e) => setContratoInicio(e.target.value)}
                         className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
                       />
                     </div>
@@ -2454,8 +2456,8 @@ function App() {
                       <label className="mb-1 block text-xs text-gray-500">Fin vigencia</label>
                       <input
                         type="date"
-                        value={simFechaFin}
-                        onChange={(e) => setSimFechaFin(e.target.value)}
+                        value={contratoFin}
+                        onChange={(e) => setContratoFin(e.target.value)}
                         className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
                       />
                     </div>
