@@ -18,6 +18,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from typing import List, Optional
 import pandas as pd
 
 from dotenv import load_dotenv
@@ -421,12 +422,17 @@ def portfolio(
 class ContratoSimulacion(BaseModel):
     tipo: str = Field("compra", description="'compra' o 'venta'")
     contraparte: str = Field("", description="Nombre libre de la contraparte")
-    energia_mensual_mwh: float = Field(..., gt=0, description="Energía en MWh/mes")
     precio_cop_kwh: float = Field(..., gt=0, description="Precio del contrato en COP/kWh")
     fecha_inicio: str = Field(..., description="Inicio de vigencia YYYY-MM-DD")
     fecha_fin: str = Field(..., description="Fin de vigencia YYYY-MM-DD")
     tipo_mercado: str = Field("regulado", description="'regulado', 'no_regulado' o 'ambos'")
-    perfil_horario: str = Field("plano", description="'plano', 'ordinario', 'sabado' o 'festivo'")
+    perfil_horario: str = Field("plano", description="'plano'|'custom'|'excel_custom'|'ordinario'|'sabado'|'festivo'")
+    # Energía total en MWh/mes (requerida para plano, solar, bloques)
+    energia_mensual_mwh: Optional[float] = Field(None, gt=0, description="Energía en MWh/mes")
+    # Para perfil solar/bloques: 24 pesos relativos (se normalizan a suma=1)
+    perfil_pesos_24h: Optional[List[float]] = Field(None, description="24 pesos horarios normalizados")
+    # Para perfil Excel: 12 × 24 valores absolutos de kWh/mes por hora
+    perfil_excel_12x24: Optional[List[List[float]]] = Field(None, description="Matriz 12×24 kWh/mes por hora")
 
 
 @app.post("/simulate")
@@ -496,12 +502,14 @@ def simulate(contrato: ContratoSimulacion):
             inventario=inventario,
             df_pb=df_pb,
             tipo=contrato.tipo,
-            energia_mensual_mwh=contrato.energia_mensual_mwh,
             precio_cop_kwh=contrato.precio_cop_kwh,
             fecha_inicio=contrato.fecha_inicio,
             fecha_fin=contrato.fecha_fin,
             tipo_mercado=contrato.tipo_mercado,
             perfil_horario=contrato.perfil_horario,
+            energia_mensual_mwh=contrato.energia_mensual_mwh,
+            perfil_pesos_24h=contrato.perfil_pesos_24h,
+            perfil_excel_12x24=contrato.perfil_excel_12x24,
         )
     except ValueError as error:
         raise HTTPException(

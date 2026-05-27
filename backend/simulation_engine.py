@@ -30,106 +30,122 @@ _PERFIL_A_CLAVE: dict[str, str] = {
 
 
 def _dias_en_mes(anio: int, mes: int) -> int:
-    """Cantidad de días del mes."""
     return calendar.monthrange(anio, mes)[1]
 
 
 def _distribuir_energia_horaria(
-    energia_mensual_kwh: float,
+    energia_mensual_kwh: float | None,
     fecha_str: str,
     perfil: str,
     inventario: dict[str, pd.DataFrame],
+    perfil_pesos_24h: list[float] | None = None,
+    perfil_excel_12x24: list[list[float]] | None = None,
 ) -> pd.Series:
     """
-    Distribuye la energía mensual (kWh) en 24 valores horarios para un día específico.
+    Devuelve una Serie indexada 1..24 con kWh que corresponden a ese día.
 
-    - perfil='plano':                    distribución uniforme entre las 24 horas.
-    - perfil='ordinario'|'sabado'|'festivo': usa la forma del inventario correspondiente,
-      normalizada para que la energía diaria sea energia_mensual_kwh / dias_en_mes.
-
-    Retorna Serie indexada 1..24 con kWh para ese día.
+    Prioridad de resolución:
+      1. perfil_excel_12x24  → usa la fila del mes directamente (kWh/mes ÷ días)
+      2. perfil_pesos_24h    → normaliza pesos y escala a energia_mensual_kwh/mes ÷ días
+      3. perfil == 'plano'   → distribución uniforme
+      4. perfil en inventario→ forma del inventario Olibia (ordinario/sabado/festivo)
+      5. fallback            → plano
     """
     fecha_obj = datetime.strptime(fecha_str, "%Y-%m-%d")
     dias = _dias_en_mes(fecha_obj.year, fecha_obj.month)
-    energia_diaria_kwh = energia_mensual_kwh / dias
 
-    # ── Perfil plano ─────────────────────────────────────────────────────────
+    # ── 1. Excel personalizado (12 × 24 kWh/mes por hora) ────────────────────
+    if perfil_excel_12x24 is not None:
+        mes_idx = fecha_obj.month - 1        # 0-11
+        if mes_idx < len(perfil_excel_12x24):
+            fila = list(perfil_excel_12x24[mes_idx])
+            # Garantizar 24 valores
+            while len(fila) < 24:
+                fila.append(0.0)
+            return pd.Series(
+                [float(v) / dias for v in fila[:24]],
+                index=range(1, 25),
+                dtype="float64",
+            )
+        # Fallback al plano con energía provista
+        kwh = (energia_mensual_kwh or 0.0)
+        return pd.Series([kwh / dias / 24.0] * 24, index=range(1, 25), dtype="float64")
+
+    # ── 2. Pesos personalizados (solar, bloques, etc.) ────────────────────────
+    if perfil_pesos_24h is not None and energia_mensual_kwh and energia_mensual_kwh > 0:
+        pesos = list(perfil_pesos_24h)
+        while len(pesos) < 24:
+            pesos.append(0.0)
+        pesos = pesos[:24]
+        total = sum(pesos)
+        energia_diaria = energia_mensual_kwh / dias
+        if total > 0:
+            return pd.Series(
+                [(p / total) * energia_diaria for p in pesos],
+                index=range(1, 25),
+                dtype="float64",
+            )
+        # Fallback plano si todos los pesos son 0
+        return pd.Series([energia_diaria / 24.0] * 24, index=range(1, 25), dtype="float64")
+
+    # ── 3. Perfil plano ───────────────────────────────────────────────────────
+    kwh = energia_mensual_kwh or 0.0
     if perfil == "plano":
-        return pd.Series(
-            [energia_diaria_kwh / 24.0] * 24,
-            index=range(1, 25),
-            dtype="float64",
-        )
+        return pd.Series([kwh / dias / 24.0] * 24, index=range(1, 25), dtype="float64")
 
-    # ── Perfil con forma (usa inventario como curva de distribución) ─────────
+    # ── 4. Perfil con forma del inventario Olibia ─────────────────────────────
     clave = _PERFIL_A_CLAVE.get(perfil)
-    if clave and clave in inventario:
+    if clave and clave in inventario and kwh > 0:
         periodo = _periodo_desde_fecha(fecha_obj)
-        df_inv = inventario[clave]
-        filas = df_inv.loc[df_inv["Periodo"] == periodo]
+        filas = inventario[clave].loc[inventario[clave]["Periodo"] == periodo]
         if not filas.empty:
             try:
                 shape = _normalizar_serie_horaria(filas, clave)
-                total_shape = shape.sum()
+                total_shape = float(shape.sum())
                 if total_shape > 0:
-                    # Normalizar shape (suma = 1) y escalar a energía diaria
-                    return (shape / total_shape) * energia_diaria_kwh
+                    energia_diaria = kwh / dias
+                    return (shape / total_shape) * energia_diaria
             except ValueError:
-                pass  # Si falla, cae al fallback plano
+                pass
 
-    # Fallback: plano
-    return pd.Series(
-        [energia_diaria_kwh / 24.0] * 24,
-        index=range(1, 25),
-        dtype="float64",
-    )
+    # ── 5. Fallback plano ─────────────────────────────────────────────────────
+    return pd.Series([kwh / dias / 24.0] * 24, index=range(1, 25), dtype="float64")
 
 
 def simular_contrato(
     inventario: dict[str, pd.DataFrame],
     df_pb: pd.DataFrame,
     tipo: str,
-    energia_mensual_mwh: float,
     precio_cop_kwh: float,
     fecha_inicio: str,
     fecha_fin: str,
     tipo_mercado: str,
     perfil_horario: str,
+    energia_mensual_mwh: float | None = None,
+    perfil_pesos_24h: list[float] | None = None,
+    perfil_excel_12x24: list[list[float]] | None = None,
 ) -> dict[str, Any]:
     """
     Simula el impacto de un nuevo contrato sobre el portafolio actual.
 
-    Para cada fecha con datos de PB dentro de la vigencia del contrato:
-      1. Calcula posición neta y costo de bolsa actuales (sin contrato).
-      2. Distribuye la energía del contrato en 24 horas según el perfil.
-      3. Suma/resta la energía a la posición según tipo (compra/venta) y mercado.
-      4. Recalcula posición neta y costo con el nuevo contrato incluido.
+    Para cada fecha con datos de PB en la vigencia del contrato:
+      1. Calcula posición neta y costo de bolsa actuales.
+      2. Distribuye la energía del contrato en 24 horas.
+      3. Aplica el contrato según tipo (compra/venta) y tipo_mercado.
+      4. Recalcula posición neta y costo de bolsa.
 
-    Args:
-        inventario:          Dict de DataFrames cargado por cargar_inventario().
-        df_pb:               DataFrame con columnas [fecha, hora, precio_bolsa].
-        tipo:                'compra' | 'venta'
-        energia_mensual_mwh: Energía del contrato en MWh/mes.
-        precio_cop_kwh:      Precio del contrato en COP/kWh (informativo; el costo
-                             de bolsa usa el precio_bolsa real, no el contrato).
-        fecha_inicio:        Inicio de vigencia YYYY-MM-DD.
-        fecha_fin:           Fin de vigencia YYYY-MM-DD.
-        tipo_mercado:        'regulado' | 'no_regulado' | 'ambos'
-        perfil_horario:      'plano' | 'ordinario' | 'sabado' | 'festivo'
-
-    Returns:
-        dict con resumen_antes, resumen_despues, recomendacion, delta_costo_mcop,
-        perfil_horario (lista 24 horas promedio) y por_mes (tabla mensual).
+    Returns dict con resumen_antes/despues, recomendacion, delta_costo_mcop,
+    perfil_horario (24h promedio) y por_mes (tabla mensual).
     """
-    energia_mensual_kwh = energia_mensual_mwh * 1_000.0
+    energia_mensual_kwh = (energia_mensual_mwh or 0.0) * 1_000.0
 
-    # Solo fechas dentro de la vigencia del contrato
+    # Filtrar PB al rango de vigencia
     fechas_pb = sorted(df_pb["fecha"].dropna().unique().tolist())
     fechas_vigencia = [f for f in fechas_pb if fecha_inicio <= f <= fecha_fin]
 
     if not fechas_vigencia:
         raise ValueError(
-            "No hay datos de precio de bolsa en el rango de vigencia del contrato "
+            f"No hay datos de PB en el rango de vigencia del contrato "
             f"({fecha_inicio} a {fecha_fin})."
         )
 
@@ -137,32 +153,35 @@ def simular_contrato(
     resultados_despues: list[pd.DataFrame] = []
 
     for fecha in fechas_vigencia:
-        # ── Posición actual (sin nuevo contrato) ─────────────────────────────
         df_pos_antes = calcular_posicion_neta(inventario, fecha)
         df_pb_dia = df_pb.loc[df_pb["fecha"] == fecha].copy()
 
         df_costo_antes = calcular_costo_bolsa(df_pos_antes, df_pb_dia)
         df_costo_antes["fecha"] = fecha
 
-        # ── Energía del nuevo contrato para este día (24 valores en kWh) ─────
+        # Distribución horaria del nuevo contrato para este día
         delta_kwh = _distribuir_energia_horaria(
-            energia_mensual_kwh, fecha, perfil_horario, inventario
+            energia_mensual_kwh if energia_mensual_kwh > 0 else None,
+            fecha,
+            perfil_horario,
+            inventario,
+            perfil_pesos_24h=perfil_pesos_24h,
+            perfil_excel_12x24=perfil_excel_12x24,
         )
         delta_values = delta_kwh.values  # ndarray (24,)
 
-        # ── Aplicar el contrato a la posición ────────────────────────────────
+        # Aplicar a la posición
         df_pos_nueva = df_pos_antes.copy()
-
         if tipo == "compra":
             if tipo_mercado == "regulado":
-                df_pos_nueva["compra_r_kwh"]  = df_pos_nueva["compra_r_kwh"]  + delta_values
+                df_pos_nueva["compra_r_kwh"]  += delta_values
             elif tipo_mercado == "no_regulado":
-                df_pos_nueva["compra_nr_kwh"] = df_pos_nueva["compra_nr_kwh"] + delta_values
-            else:  # ambos — split 50/50
-                df_pos_nueva["compra_r_kwh"]  = df_pos_nueva["compra_r_kwh"]  + delta_values * 0.5
-                df_pos_nueva["compra_nr_kwh"] = df_pos_nueva["compra_nr_kwh"] + delta_values * 0.5
+                df_pos_nueva["compra_nr_kwh"] += delta_values
+            else:  # ambos
+                df_pos_nueva["compra_r_kwh"]  += delta_values * 0.5
+                df_pos_nueva["compra_nr_kwh"] += delta_values * 0.5
         else:  # venta
-            df_pos_nueva["venta_kwh"] = df_pos_nueva["venta_kwh"] + delta_values
+            df_pos_nueva["venta_kwh"] += delta_values
 
         df_pos_nueva["posicion_neta_kwh"] = (
             df_pos_nueva["compra_r_kwh"]
@@ -197,25 +216,17 @@ def simular_contrato(
     resumen_despues = _resumen(df_despues)
 
     # ── Semáforo ──────────────────────────────────────────────────────────────
-    # Costo positivo = pago neto a bolsa; negativo = ingreso neto de bolsa.
-    # Reducir el costo (delta < 0) siempre es favorable.
     delta_costo_mcop = round(
         float(resumen_despues["costo_bolsa_total_mcop"])
         - float(resumen_antes["costo_bolsa_total_mcop"]),
         2,
     )
     mejora_costo = delta_costo_mcop < 0
-
     delta_pos = (
         float(resumen_despues["posicion_neta_total_mwh"])
         - float(resumen_antes["posicion_neta_total_mwh"])
     )
-    # Venta: reduce posición (más vendido) → mejora si bolsa alta
-    # Compra: sube posición (más comprado) → evaluamos solo por costo
-    if tipo == "venta":
-        mejora_posicion = delta_pos < 0
-    else:
-        mejora_posicion = mejora_costo
+    mejora_posicion = (delta_pos < 0) if tipo == "venta" else mejora_costo
 
     if mejora_costo and mejora_posicion:
         recomendacion = "verde"
@@ -224,64 +235,58 @@ def simular_contrato(
     else:
         recomendacion = "rojo"
 
-    # ── Perfil horario promedio (media aritmética por hora sobre el período) ──
-    perfil_a_df = df_antes.groupby("hora")["posicion_neta_kwh"].mean().reset_index()
-    perfil_d_df = df_despues.groupby("hora")["posicion_neta_kwh"].mean().reset_index()
-    perfil_merge = pd.merge(
-        perfil_a_df, perfil_d_df, on="hora", suffixes=("_antes", "_despues")
-    )
+    # ── Perfil horario promedio (24h) ─────────────────────────────────────────
+    pa = df_antes.groupby("hora")["posicion_neta_kwh"].mean().reset_index()
+    pd_ = df_despues.groupby("hora")["posicion_neta_kwh"].mean().reset_index()
+    pm = pd.merge(pa, pd_, on="hora", suffixes=("_a", "_d"))
     perfil_horario_lista = [
         {
-            "hora": int(row["hora"]),
-            "posicion_antes_mwh":   round(float(row["posicion_neta_kwh_antes"]   / 1_000), 2),
-            "posicion_despues_mwh": round(float(row["posicion_neta_kwh_despues"] / 1_000), 2),
+            "hora": int(r["hora"]),
+            "posicion_antes_mwh":   round(float(r["posicion_neta_kwh_a"] / 1_000), 2),
+            "posicion_despues_mwh": round(float(r["posicion_neta_kwh_d"] / 1_000), 2),
         }
-        for _, row in perfil_merge.iterrows()
+        for _, r in pm.iterrows()
     ]
 
-    # ── Tabla resumen por mes ─────────────────────────────────────────────────
+    # ── Tabla por mes ─────────────────────────────────────────────────────────
     df_antes["mes_key"]   = pd.to_datetime(df_antes["fecha"]).dt.to_period("M")
     df_despues["mes_key"] = pd.to_datetime(df_despues["fecha"]).dt.to_period("M")
 
     agg_a = df_antes.groupby("mes_key").agg(
-        pos_kwh=("posicion_neta_kwh", "sum"),
-        costo_cop=("costo_bolsa_cop", "sum"),
+        pos_kwh=("posicion_neta_kwh", "sum"), costo_cop=("costo_bolsa_cop", "sum")
     )
     agg_d = df_despues.groupby("mes_key").agg(
-        pos_kwh=("posicion_neta_kwh", "sum"),
-        costo_cop=("costo_bolsa_cop", "sum"),
+        pos_kwh=("posicion_neta_kwh", "sum"), costo_cop=("costo_bolsa_cop", "sum")
     )
-    merge_mes = agg_a.join(agg_d, lsuffix="_antes", rsuffix="_despues")
-
+    mm = agg_a.join(agg_d, lsuffix="_a", rsuffix="_d")
     por_mes = []
-    for periodo_idx, row in merge_mes.iterrows():
-        mes_label = f"{MES_ABR[periodo_idx.month]}-{str(periodo_idx.year)[-2:]}"
-        pos_a   = float(row["pos_kwh_antes"]   / 1_000)
-        pos_d   = float(row["pos_kwh_despues"] / 1_000)
-        costo_a = float(row["costo_cop_antes"]   / 1_000_000)
-        costo_d = float(row["costo_cop_despues"] / 1_000_000)
+    for pi, row in mm.iterrows():
+        lbl = f"{MES_ABR[pi.month]}-{str(pi.year)[-2:]}"
+        pa_ = float(row["pos_kwh_a"] / 1_000)
+        pd__ = float(row["pos_kwh_d"] / 1_000)
+        ca = float(row["costo_cop_a"] / 1_000_000)
+        cd = float(row["costo_cop_d"] / 1_000_000)
         por_mes.append({
-            "mes":             mes_label,
-            "pos_actual_mwh":  round(pos_a, 2),
-            "pos_nueva_mwh":   round(pos_d, 2),
-            "diferencia_mwh":  round(pos_d - pos_a, 2),
-            "costo_actual_mcop": round(costo_a, 2),
-            "costo_nuevo_mcop":  round(costo_d, 2),
-            "ahorro_mcop":       round(costo_a - costo_d, 2),
+            "mes": lbl,
+            "pos_actual_mwh":  round(pa_, 2),
+            "pos_nueva_mwh":   round(pd__, 2),
+            "diferencia_mwh":  round(pd__ - pa_, 2),
+            "costo_actual_mcop": round(ca, 2),
+            "costo_nuevo_mcop":  round(cd, 2),
+            "ahorro_mcop":       round(ca - cd, 2),
         })
 
     print(
-        f"[simulate] tipo={tipo} energia={energia_mensual_mwh}MWh/mes "
-        f"mercado={tipo_mercado} perfil={perfil_horario} "
-        f"fechas={len(fechas_vigencia)} recomendacion={recomendacion} "
-        f"delta_costo={delta_costo_mcop:+.2f}M COP"
+        f"[simulate] tipo={tipo} mercado={tipo_mercado} perfil={perfil_horario} "
+        f"energia={energia_mensual_mwh}MWh/mes fechas={len(fechas_vigencia)} "
+        f"recomendacion={recomendacion} delta={delta_costo_mcop:+.2f}M COP"
     )
 
     return {
-        "resumen_antes":   resumen_antes,
-        "resumen_despues": resumen_despues,
-        "recomendacion":   recomendacion,
+        "resumen_antes":    resumen_antes,
+        "resumen_despues":  resumen_despues,
+        "recomendacion":    recomendacion,
         "delta_costo_mcop": delta_costo_mcop,
-        "perfil_horario":  perfil_horario_lista,
-        "por_mes":         por_mes,
+        "perfil_horario":   perfil_horario_lista,
+        "por_mes":          por_mes,
     }

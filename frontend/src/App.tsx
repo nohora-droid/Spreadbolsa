@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import * as XLSX from 'xlsx'
 import {
   Bar,
   BarChart,
@@ -51,12 +52,31 @@ const COLORES_MES_COMPARATIVO = [
   { text: 'text-orange-400', bg: 'bg-orange-500/15', ring: 'ring-orange-500/40' },
 ] as const
 
+const ENSO_OPCIONES = [
+  { key: 'nino_2015',    label: 'El Niño Fuerte (2015-2016)',       inicio: '2015-03-01', fin: '2016-05-31' },
+  { key: 'nina_2020',    label: 'La Niña Persistente (2020-2022)',   inicio: '2020-09-01', fin: '2022-03-31' },
+  { key: 'nino_2023',    label: 'El Niño Fuerte (2023-2024)',        inicio: '2023-06-01', fin: '2024-05-31' },
+  { key: 'neutral_2025', label: 'Neutral (2025)',                    inicio: '2025-01-01', fin: '2025-12-31' },
+] as const
+
+// Curva solar típica para Colombia (ecuatorial) — suma = 1.0
+// H1-H6 y H19-H24 = 0; H7-H12 sube, H13-H18 baja
+const SOLAR_PESOS_24H: number[] = [
+  0,    0,    0,    0,    0,    0,     // H1-H6
+  0.02, 0.06, 0.11, 0.15, 0.15, 0.14, // H7-H12
+  0.12, 0.10, 0.08, 0.05, 0.02, 0,    // H13-H18
+  0,    0,    0,    0,    0,    0,     // H19-H24
+]
+
 type VistaAnalisis = 'dia' | 'mes' | 'comparativo'
 type DashboardTab = 'spread' | 'portafolio' | 'simulador'
 type SimTipo = 'compra' | 'venta'
 type SimMercado = 'regulado' | 'no_regulado' | 'ambos'
-type SimPerfil = 'plano' | 'ordinario' | 'sabado' | 'festivo'
+type SimFuentePB = 'historico' | 'enso'
+type SimPerfilTipo = 'plano' | 'bloques' | 'solar' | 'excel'
 type SimRecomendacion = 'verde' | 'amarillo' | 'rojo'
+
+interface SimBloque { horaInicio: number; horaFin: number; mwhMes: number }
 
 interface FilaSpread {
   fecha: string
@@ -441,6 +461,8 @@ function App() {
   const [portfolioFiltroTipoDia, setPortfolioFiltroTipoDia] = useState('todos')
 
   // ── Simulador ──────────────────────────────────────────────────────────────
+  const [simFuentePB, setSimFuentePB] = useState<SimFuentePB>('historico')
+  const [simEnso, setSimEnso] = useState('nino_2023')
   const [simTipo, setSimTipo] = useState<SimTipo>('compra')
   const [simContraparte, setSimContraparte] = useState('')
   const [simEnergiaMwh, setSimEnergiaMwh] = useState(1000)
@@ -450,10 +472,16 @@ function App() {
     () => new Date().toISOString().split('T')[0],
   )
   const [simTipoMercado, setSimTipoMercado] = useState<SimMercado>('regulado')
-  const [simPerfil, setSimPerfil] = useState<SimPerfil>('plano')
+  const [simPerfilTipo, setSimPerfilTipo] = useState<SimPerfilTipo>('plano')
+  const [simBloques, setSimBloques] = useState<SimBloque[]>([
+    { horaInicio: 8, horaFin: 17, mwhMes: 1000 },
+  ])
+  const [simExcel12x24, setSimExcel12x24] = useState<number[][] | null>(null)
+  const [simExcelNombre, setSimExcelNombre] = useState('')
   const [simResultado, setSimResultado] = useState<SimResultado | null>(null)
   const [simCargando, setSimCargando] = useState(false)
   const [simError, setSimError] = useState<string | null>(null)
+  const simExcelInputRef = useRef<HTMLInputElement>(null)
 
   const datosConSpread = useMemo(() => {
     return datos.map((d) => ({
@@ -621,20 +649,139 @@ function App() {
     cargarPortafolio(portfolioFechaInicio, portfolioFechaFin)
   }
 
+  // Auto-fill dates when ENSO option changes
+  useEffect(() => {
+    if (simFuentePB !== 'enso') return
+    const enso = ENSO_OPCIONES.find((e) => e.key === simEnso)
+    if (enso) {
+      setSimFechaInicio(enso.inicio)
+      setSimFechaFin(enso.fin)
+    }
+  }, [simFuentePB, simEnso])
+
+  function addBloque() {
+    if (simBloques.length >= 3) return
+    setSimBloques((prev) => [...prev, { horaInicio: 18, horaFin: 22, mwhMes: 500 }])
+  }
+
+  function removeBloque(idx: number) {
+    setSimBloques((prev) => prev.filter((_, i) => i !== idx))
+  }
+
+  function updateBloque(idx: number, campo: keyof SimBloque, valor: number) {
+    setSimBloques((prev) =>
+      prev.map((b, i) =>
+        i === idx
+          ? {
+              ...b,
+              [campo]: valor,
+              // Ensure horaFin >= horaInicio
+              ...(campo === 'horaInicio' && valor > b.horaFin
+                ? { horaFin: valor }
+                : {}),
+            }
+          : b,
+      ),
+    )
+  }
+
+  function handleExcelUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setSimExcelNombre(file.name)
+    const reader = new FileReader()
+    reader.onload = (evt) => {
+      try {
+        const wb = XLSX.read(evt.target?.result, { type: 'binary' })
+        const ws = wb.Sheets[wb.SheetNames[0]]
+        const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1 }) as unknown[][]
+        // Skip header row if first cell is text (e.g. "Mes", "H1", etc.)
+        const dataRows = rows.filter(
+          (r) => Array.isArray(r) && r.length >= 24 && typeof r[0] === 'number',
+        )
+        if (dataRows.length < 1) {
+          setSimError(
+            'El archivo no tiene filas numéricas válidas. Asegúrate de que filas = meses y columnas = H1..H24 con valores en kWh.',
+          )
+          return
+        }
+        const matrix: number[][] = dataRows.slice(0, 12).map((row) =>
+          Array.from({ length: 24 }, (_, i) => parseFloat(String((row as unknown[])[i] ?? 0)) || 0),
+        )
+        while (matrix.length < 12) matrix.push([...matrix[matrix.length - 1]])
+        setSimExcel12x24(matrix)
+        setSimError(null)
+      } catch {
+        setSimError('Error al leer el archivo Excel. Verifica el formato.')
+      }
+    }
+    reader.readAsBinaryString(file)
+    // Reset input so same file can be re-uploaded
+    e.target.value = ''
+  }
+
   async function cargarSimulacion() {
+    // ── Validate profile configuration ───────────────────────────────────────
+    if (simPerfilTipo === 'excel' && !simExcel12x24) {
+      setSimError('Carga un archivo Excel antes de simular.')
+      return
+    }
+    if (
+      (simPerfilTipo === 'plano' || simPerfilTipo === 'solar') &&
+      simEnergiaMwh <= 0
+    ) {
+      setSimError('Ingresa una energía mensual mayor que 0.')
+      return
+    }
+
     try {
       setSimCargando(true)
       setSimError(null)
-      const body = {
+
+      // ── Build profile fields for the API ───────────────────────────────────
+      let perfil_horario = 'plano'
+      let energia_mensual_mwh: number | undefined = undefined
+      let perfil_pesos_24h: number[] | undefined = undefined
+      let perfil_excel_12x24: number[][] | undefined = undefined
+
+      if (simPerfilTipo === 'plano') {
+        perfil_horario = 'plano'
+        energia_mensual_mwh = simEnergiaMwh
+      } else if (simPerfilTipo === 'solar') {
+        perfil_horario = 'custom'
+        energia_mensual_mwh = simEnergiaMwh
+        perfil_pesos_24h = SOLAR_PESOS_24H
+      } else if (simPerfilTipo === 'bloques') {
+        perfil_horario = 'custom'
+        // Build 24 weights from block definitions
+        const pesos = new Array<number>(24).fill(0)
+        for (const b of simBloques) {
+          const horas = Math.max(1, b.horaFin - b.horaInicio + 1)
+          const mwhPorHora = b.mwhMes / horas
+          for (let h = b.horaInicio; h <= Math.min(b.horaFin, 24); h++) {
+            pesos[h - 1] += mwhPorHora
+          }
+        }
+        perfil_pesos_24h = pesos
+        energia_mensual_mwh = pesos.reduce((s, v) => s + v, 0)
+      } else if (simPerfilTipo === 'excel' && simExcel12x24) {
+        perfil_horario = 'excel_custom'
+        perfil_excel_12x24 = simExcel12x24
+      }
+
+      const body: Record<string, unknown> = {
         tipo: simTipo,
         contraparte: simContraparte,
-        energia_mensual_mwh: simEnergiaMwh,
         precio_cop_kwh: simPrecio,
         fecha_inicio: simFechaInicio,
         fecha_fin: simFechaFin,
         tipo_mercado: simTipoMercado,
-        perfil_horario: simPerfil,
+        perfil_horario,
+        ...(energia_mensual_mwh != null ? { energia_mensual_mwh } : {}),
+        ...(perfil_pesos_24h != null ? { perfil_pesos_24h } : {}),
+        ...(perfil_excel_12x24 != null ? { perfil_excel_12x24 } : {}),
       }
+
       const respuesta = await fetch(API_SIMULATE, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -958,7 +1105,7 @@ function App() {
           <div className="inline-flex rounded-lg border border-gray-700 bg-gray-950 p-1">
             {(
               [
-                ['spread', 'Spread PB'],
+                ['spread', 'Mercado'],
                 ['portafolio', 'Portafolio'],
                 ['simulador', 'Simulador'],
               ] as const
@@ -981,6 +1128,12 @@ function App() {
 
         {tabActiva === 'spread' && (
           <>
+            <div>
+              <h2 className="text-xl font-bold text-gray-100">Mercado</h2>
+              <p className="mt-0.5 text-sm text-gray-500">
+                Análisis de comportamiento del precio de bolsa
+              </p>
+            </div>
             <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
           <div className="flex flex-wrap items-end gap-4">
             <div className="flex min-w-[200px] flex-1 flex-col gap-2 sm:max-w-xs">
@@ -1558,7 +1711,7 @@ function App() {
               )}
             </section>
 
-            <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
               <MetricCard
                 label="Posición Neta (MWh)"
                 value={
@@ -1603,6 +1756,16 @@ function App() {
                 }
                 accent="text-rose-400"
               />
+              <div className="rounded-xl border border-dashed border-amber-500/30 bg-amber-500/5 p-5">
+                <p className="text-xs font-medium uppercase tracking-wider text-amber-600">
+                  PPP Contratos
+                </p>
+                <p className="mt-2 text-lg font-bold text-amber-500/60">Pendiente</p>
+                <p className="mt-1 text-xs text-gray-600 leading-relaxed">
+                  Requiere precios por contrato desde Olibia. Se calculará como
+                  Σ(energía × precio) / Σ(energía).
+                </p>
+              </div>
             </section>
 
             <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
@@ -1945,22 +2108,109 @@ function App() {
         )}
 
         {/* ══════════════════════════════════════════════════════════════════
-            TAB: SIMULADOR
+            TAB: SIMULADOR  (redesign v2)
         ══════════════════════════════════════════════════════════════════ */}
         {tabActiva === 'simulador' && (
           <>
+            {/* Header */}
+            <div>
+              <h2 className="text-xl font-bold text-gray-100">Simulador</h2>
+              <p className="mt-0.5 text-sm text-gray-500">
+                Evalúa el impacto de un nuevo contrato sobre el portafolio Olibia
+              </p>
+            </div>
+
+            {/* ── Two-column layout: form (left) + results (right) ─────── */}
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
 
-              {/* ── Panel izquierdo: formulario ──────────────────────────── */}
-              <div className="lg:col-span-2">
-                <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
-                  <h2 className="mb-5 text-lg font-semibold text-gray-200">
-                    Nuevo contrato
-                  </h2>
+              {/* ═══════════════════════════════════════════════════════════
+                  LEFT PANEL — form
+              ═══════════════════════════════════════════════════════════ */}
+              <div className="space-y-4 lg:col-span-2">
+
+                {/* ── PARTE A: Escenario de PB ─────────────────────────── */}
+                <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+                  <p className="mb-4 text-xs font-semibold uppercase tracking-widest text-emerald-500">
+                    A — Escenario de precio de bolsa
+                  </p>
+
+                  {/* Toggle Histórico / ENSO */}
+                  <div className="mb-4 inline-flex w-full rounded-lg border border-gray-700 bg-gray-950 p-1">
+                    {(['historico', 'enso'] as SimFuentePB[]).map((f) => (
+                      <button
+                        key={f}
+                        type="button"
+                        onClick={() => setSimFuentePB(f)}
+                        className={`flex-1 rounded-md py-2 text-sm font-semibold transition ${
+                          simFuentePB === f
+                            ? 'bg-emerald-600 text-white shadow-sm'
+                            : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+                        }`}
+                      >
+                        {f === 'historico' ? '📅 PB Histórico' : '🌡 Fenómeno ENSO'}
+                      </button>
+                    ))}
+                  </div>
+
+                  {simFuentePB === 'historico' ? (
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="mb-1 block text-xs text-gray-500">Desde</label>
+                        <input
+                          type="date"
+                          min="2010-01-01"
+                          value={simFechaInicio}
+                          onChange={(e) => setSimFechaInicio(e.target.value)}
+                          className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-xs text-gray-500">Hasta</label>
+                        <input
+                          type="date"
+                          value={simFechaFin}
+                          onChange={(e) => setSimFechaFin(e.target.value)}
+                          className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="mb-1 block text-xs text-gray-500">
+                        Período de referencia
+                      </label>
+                      <select
+                        value={simEnso}
+                        onChange={(e) => setSimEnso(e.target.value)}
+                        className={CLASE_SELECT + ' w-full'}
+                      >
+                        {ENSO_OPCIONES.map((e) => (
+                          <option key={e.key} value={e.key}>
+                            {e.label}
+                          </option>
+                        ))}
+                      </select>
+                      {(() => {
+                        const enso = ENSO_OPCIONES.find((e) => e.key === simEnso)
+                        return enso ? (
+                          <p className="mt-2 text-xs text-gray-600">
+                            📌 {enso.inicio} → {enso.fin}
+                          </p>
+                        ) : null
+                      })()}
+                    </div>
+                  )}
+                </section>
+
+                {/* ── PARTE C: Nuevo contrato ──────────────────────────── */}
+                <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+                  <p className="mb-4 text-xs font-semibold uppercase tracking-widest text-blue-400">
+                    C — Nuevo contrato
+                  </p>
 
                   {/* Tipo Compra / Venta */}
-                  <div className="mb-5">
-                    <label className="mb-2 block text-sm font-medium text-gray-400">
+                  <div className="mb-4">
+                    <label className="mb-1.5 block text-xs text-gray-500">
                       Tipo de operación
                     </label>
                     <div className="inline-flex w-full rounded-lg border border-gray-700 bg-gray-950 p-1">
@@ -1983,84 +2233,229 @@ function App() {
                     </div>
                   </div>
 
-                  {/* Contraparte */}
-                  <div className="mb-4">
-                    <label className="mb-1.5 block text-sm font-medium text-gray-400">
-                      Contraparte
-                    </label>
+                  {/* Contraparte + Precio */}
+                  <div className="mb-3">
+                    <label className="mb-1 block text-xs text-gray-500">Contraparte</label>
                     <input
                       type="text"
                       placeholder="Nombre de la contraparte"
                       value={simContraparte}
                       onChange={(e) => setSimContraparte(e.target.value)}
-                      className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 placeholder-gray-600 outline-none transition focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                      className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 placeholder-gray-600 outline-none transition focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                    />
+                  </div>
+                  <div className="mb-4">
+                    <label className="mb-1 block text-xs text-gray-500">
+                      Precio (COP/kWh)
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={simPrecio}
+                      onChange={(e) =>
+                        setSimPrecio(Math.max(1, Number(e.target.value) || 1))
+                      }
+                      className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
                     />
                   </div>
 
-                  {/* Energía + Precio */}
-                  <div className="mb-4 grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="mb-1.5 block text-sm font-medium text-gray-400">
-                        Energía (MWh/mes)
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        value={simEnergiaMwh}
-                        onChange={(e) =>
-                          setSimEnergiaMwh(Math.max(1, Number(e.target.value) || 1))
-                        }
-                        className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 outline-none transition focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
-                      />
+                  {/* Perfil horario */}
+                  <div className="mb-4">
+                    <label className="mb-2 block text-xs text-gray-500">
+                      Distribución horaria
+                    </label>
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {(
+                        [
+                          ['plano', 'Plano 24h'],
+                          ['bloques', 'Bloques'],
+                          ['solar', 'Solar'],
+                          ['excel', 'Excel'],
+                        ] as [SimPerfilTipo, string][]
+                      ).map(([p, lbl]) => (
+                        <button
+                          key={p}
+                          type="button"
+                          onClick={() => setSimPerfilTipo(p)}
+                          className={`rounded-lg py-2 text-xs font-semibold transition ${
+                            simPerfilTipo === p
+                              ? 'bg-gray-600 text-white ring-1 ring-gray-400'
+                              : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
+                          }`}
+                        >
+                          {lbl}
+                        </button>
+                      ))}
                     </div>
-                    <div>
-                      <label className="mb-1.5 block text-sm font-medium text-gray-400">
-                        Precio (COP/kWh)
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        value={simPrecio}
-                        onChange={(e) =>
-                          setSimPrecio(Math.max(1, Number(e.target.value) || 1))
-                        }
-                        className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 outline-none transition focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
-                      />
+
+                    {/* Profile-specific inputs */}
+                    <div className="mt-3">
+                      {(simPerfilTipo === 'plano' || simPerfilTipo === 'solar') && (
+                        <div>
+                          <label className="mb-1 block text-xs text-gray-500">
+                            Energía mensual (MWh/mes)
+                          </label>
+                          <input
+                            type="number"
+                            min={1}
+                            value={simEnergiaMwh}
+                            onChange={(e) =>
+                              setSimEnergiaMwh(Math.max(1, Number(e.target.value) || 1))
+                            }
+                            className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                          />
+                          {simPerfilTipo === 'solar' && (
+                            <p className="mt-1.5 text-xs text-gray-600">
+                              Curva solar: 0 en H1-H6 y H19-H24 · sube H7-H12 · baja H13-H18
+                            </p>
+                          )}
+                        </div>
+                      )}
+
+                      {simPerfilTipo === 'bloques' && (
+                        <div className="space-y-2">
+                          {simBloques.map((b, idx) => (
+                            <div
+                              key={idx}
+                              className="flex items-end gap-2 rounded-lg border border-gray-700 bg-gray-950/60 p-3"
+                            >
+                              <div className="flex flex-col gap-1">
+                                <label className="text-xs text-gray-600">H ini</label>
+                                <select
+                                  value={b.horaInicio}
+                                  onChange={(e) =>
+                                    updateBloque(idx, 'horaInicio', Number(e.target.value))
+                                  }
+                                  className="w-16 rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 outline-none"
+                                >
+                                  {Array.from({ length: 24 }, (_, i) => i + 1).map((h) => (
+                                    <option key={h} value={h}>
+                                      H{h}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                <label className="text-xs text-gray-600">H fin</label>
+                                <select
+                                  value={b.horaFin}
+                                  onChange={(e) =>
+                                    updateBloque(idx, 'horaFin', Number(e.target.value))
+                                  }
+                                  className="w-16 rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 outline-none"
+                                >
+                                  {Array.from({ length: 24 }, (_, i) => i + 1)
+                                    .filter((h) => h >= b.horaInicio)
+                                    .map((h) => (
+                                      <option key={h} value={h}>
+                                        H{h}
+                                      </option>
+                                    ))}
+                                </select>
+                              </div>
+                              <div className="flex flex-1 flex-col gap-1">
+                                <label className="text-xs text-gray-600">MWh/mes</label>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={b.mwhMes}
+                                  onChange={(e) =>
+                                    updateBloque(idx, 'mwhMes', Math.max(1, Number(e.target.value) || 1))
+                                  }
+                                  className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 outline-none"
+                                />
+                              </div>
+                              {simBloques.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => removeBloque(idx)}
+                                  className="rounded px-1.5 py-1.5 text-gray-600 hover:text-red-400 transition"
+                                >
+                                  ✕
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                          {simBloques.length < 3 && (
+                            <button
+                              type="button"
+                              onClick={addBloque}
+                              className="w-full rounded-lg border border-dashed border-gray-700 py-2 text-xs text-gray-500 transition hover:border-gray-500 hover:text-gray-300"
+                            >
+                              + Agregar bloque
+                            </button>
+                          )}
+                          <p className="text-xs text-gray-600">
+                            Total:{' '}
+                            {formatMiles(
+                              simBloques.reduce((s, b) => s + b.mwhMes, 0),
+                              0,
+                            )}{' '}
+                            MWh/mes
+                          </p>
+                        </div>
+                      )}
+
+                      {simPerfilTipo === 'excel' && (
+                        <div>
+                          <input
+                            ref={simExcelInputRef}
+                            type="file"
+                            accept=".xlsx,.xls,.csv"
+                            className="hidden"
+                            onChange={handleExcelUpload}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => simExcelInputRef.current?.click()}
+                            className="w-full rounded-lg border border-dashed border-gray-600 py-3 text-sm text-gray-400 transition hover:border-emerald-500/50 hover:text-emerald-400"
+                          >
+                            📎 Cargar archivo Excel / CSV
+                          </button>
+                          {simExcelNombre && (
+                            <p className="mt-1.5 flex items-center gap-1.5 text-xs text-emerald-400">
+                              <span>✓</span>
+                              {simExcelNombre}
+                              {simExcel12x24 && (
+                                <span className="text-gray-600">
+                                  ({simExcel12x24.length} meses)
+                                </span>
+                              )}
+                            </p>
+                          )}
+                          <p className="mt-2 text-xs text-gray-600 leading-relaxed">
+                            Plantilla: filas = meses (Ene–Dic), columnas = H1..H24, valores en kWh.
+                            Exportar desde Excel como CSV o .xlsx.
+                          </p>
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  {/* Fechas vigencia */}
+                  {/* Vigencia y mercado */}
                   <div className="mb-4 grid grid-cols-2 gap-3">
                     <div>
-                      <label className="mb-1.5 block text-sm font-medium text-gray-400">
-                        Inicio vigencia
-                      </label>
+                      <label className="mb-1 block text-xs text-gray-500">Inicio vigencia</label>
                       <input
                         type="date"
                         min="2010-01-01"
                         value={simFechaInicio}
                         onChange={(e) => setSimFechaInicio(e.target.value)}
-                        className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                        className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
                       />
                     </div>
                     <div>
-                      <label className="mb-1.5 block text-sm font-medium text-gray-400">
-                        Fin vigencia
-                      </label>
+                      <label className="mb-1 block text-xs text-gray-500">Fin vigencia</label>
                       <input
                         type="date"
                         value={simFechaFin}
                         onChange={(e) => setSimFechaFin(e.target.value)}
-                        className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                        className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
                       />
                     </div>
                   </div>
-
-                  {/* Tipo mercado */}
-                  <div className="mb-4">
-                    <label className="mb-1.5 block text-sm font-medium text-gray-400">
-                      Tipo de mercado
-                    </label>
+                  <div className="mb-5">
+                    <label className="mb-1 block text-xs text-gray-500">Tipo de mercado</label>
                     <select
                       value={simTipoMercado}
                       onChange={(e) => setSimTipoMercado(e.target.value as SimMercado)}
@@ -2072,28 +2467,7 @@ function App() {
                     </select>
                   </div>
 
-                  {/* Perfil horario */}
-                  <div className="mb-6">
-                    <label className="mb-1.5 block text-sm font-medium text-gray-400">
-                      Perfil horario
-                    </label>
-                    <select
-                      value={simPerfil}
-                      onChange={(e) => setSimPerfil(e.target.value as SimPerfil)}
-                      className={CLASE_SELECT + ' w-full'}
-                    >
-                      <option value="plano">Plano (uniforme 24h)</option>
-                      <option value="ordinario">Ordinario (curva laboral)</option>
-                      <option value="sabado">Sábado</option>
-                      <option value="festivo">Festivo / Domingo</option>
-                    </select>
-                    <p className="mt-1.5 text-xs text-gray-600">
-                      Plano distribuye igual en cada hora. Los perfiles
-                      con forma usan las curvas del inventario Olibia.
-                    </p>
-                  </div>
-
-                  {/* Botón */}
+                  {/* CTA */}
                   <button
                     type="button"
                     onClick={cargarSimulacion}
@@ -2109,69 +2483,93 @@ function App() {
                       '⚡ Simular impacto'
                     )}
                   </button>
-
                   {simError && (
-                    <div className="mt-4 rounded-lg border border-red-900/50 bg-red-950/30 px-4 py-3 text-sm text-red-400">
+                    <div className="mt-3 rounded-lg border border-red-900/50 bg-red-950/30 px-4 py-3 text-sm text-red-400">
                       {simError}
                     </div>
                   )}
                 </section>
               </div>
 
-              {/* ── Panel derecho: resultados ────────────────────────────── */}
-              <div className="space-y-6 lg:col-span-3">
+              {/* ═══════════════════════════════════════════════════════════
+                  RIGHT PANEL — results
+              ═══════════════════════════════════════════════════════════ */}
+              <div className="space-y-4 lg:col-span-3">
                 {!simResultado && !simCargando && (
-                  <div className="flex h-64 items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30 text-sm text-gray-500">
-                    Configura el contrato y pulsa «Simular impacto» para ver los resultados.
+                  <div className="flex h-80 flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30 text-center">
+                    <span className="mb-3 text-3xl">⚡</span>
+                    <p className="text-sm text-gray-400">Configura el escenario y el contrato</p>
+                    <p className="mt-1 text-xs text-gray-600">
+                      Pulsa «Simular impacto» para ver los resultados comparativos
+                    </p>
                   </div>
                 )}
 
                 {simResultado && (() => {
                   const { resumen_antes: ra, resumen_despues: rd, recomendacion, delta_costo_mcop } = simResultado
-
-                  const semCfg: Record<SimRecomendacion, { bg: string; textColor: string; icon: string; titulo: string; desc: string }> = {
+                  const semCfg: Record<SimRecomendacion, { borderBg: string; color: string; icon: string; titulo: string; desc: string }> = {
                     verde: {
-                      bg: 'border-emerald-500/40 bg-emerald-500/10',
-                      textColor: 'text-emerald-400',
+                      borderBg: 'border-emerald-500/40 bg-emerald-500/10',
+                      color: 'text-emerald-400',
                       icon: '✓',
                       titulo: 'CONVIENE',
-                      desc: 'El contrato mejora la posición del portafolio y reduce el costo de bolsa.',
+                      desc: 'El contrato mejora la posición y reduce el costo de bolsa.',
                     },
                     amarillo: {
-                      bg: 'border-amber-500/40 bg-amber-500/10',
-                      textColor: 'text-amber-400',
+                      borderBg: 'border-amber-500/40 bg-amber-500/10',
+                      color: 'text-amber-400',
                       icon: '⚠',
                       titulo: 'EVALUAR',
-                      desc: 'Impacto mixto: el contrato mejora algunos indicadores pero no todos.',
+                      desc: 'Impacto mixto: mejora algunos indicadores pero no todos.',
                     },
                     rojo: {
-                      bg: 'border-red-500/40 bg-red-500/10',
-                      textColor: 'text-red-400',
+                      borderBg: 'border-red-500/40 bg-red-500/10',
+                      color: 'text-red-400',
                       icon: '✗',
                       titulo: 'NO CONVIENE',
                       desc: 'El contrato empeora la posición y aumenta el costo de bolsa.',
                     },
                   }
                   const sem = semCfg[recomendacion]
-                  const lineaColor = { verde: '#22c55e', amarillo: '#eab308', rojo: '#ef4444' }[recomendacion]
 
                   return (
                     <>
+                      {/* PARTE B — Posición base */}
+                      <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-4">
+                        <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-gray-500">
+                          B — Posición base (sin contrato nuevo)
+                        </p>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="rounded-lg bg-gray-950/50 px-4 py-3">
+                            <p className="text-xs text-gray-500">Posición Neta</p>
+                            <p className={`mt-1 text-xl font-bold tabular-nums ${ra.posicion_neta_total_mwh <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                              {formatMiles(ra.posicion_neta_total_mwh, 0)} <span className="text-sm font-normal text-gray-500">MWh</span>
+                            </p>
+                          </div>
+                          <div className="rounded-lg bg-gray-950/50 px-4 py-3">
+                            <p className="text-xs text-gray-500">Costo Bolsa</p>
+                            <p className={`mt-1 text-xl font-bold tabular-nums ${ra.costo_bolsa_total_mcop <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                              {formatMiles(ra.costo_bolsa_total_mcop, 2)} <span className="text-sm font-normal text-gray-500">M COP</span>
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
                       {/* Semáforo */}
-                      <div className={`rounded-xl border px-5 py-4 ${sem.bg}`}>
+                      <div className={`rounded-xl border px-5 py-4 ${sem.borderBg}`}>
                         <div className="flex items-center gap-3">
-                          <span className={`text-2xl font-bold ${sem.textColor}`}>{sem.icon}</span>
-                          <div>
-                            <p className={`text-base font-bold ${sem.textColor}`}>{sem.titulo}</p>
+                          <span className={`text-2xl font-bold ${sem.color}`}>{sem.icon}</span>
+                          <div className="flex-1">
+                            <p className={`text-base font-bold ${sem.color}`}>{sem.titulo}</p>
                             <p className="text-sm text-gray-400">{sem.desc}</p>
                           </div>
-                          <span className={`ml-auto text-right text-sm font-semibold tabular-nums ${delta_costo_mcop < 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          <span className={`text-right text-sm font-semibold tabular-nums ${delta_costo_mcop < 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                             {delta_costo_mcop < 0 ? '▼' : '▲'} {Math.abs(delta_costo_mcop).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} M COP
                           </span>
                         </div>
                       </div>
 
-                      {/* 4 KPI cards comparativas */}
+                      {/* PARTE D — KPI comparativas */}
                       <div className="grid grid-cols-2 gap-3">
                         <SimCompareCard
                           label="Posición Neta (MWh)"
@@ -2208,11 +2606,9 @@ function App() {
               </div>
             </div>
 
-            {/* ── Gráfica comparativa + tabla (ancho completo) ──────────── */}
+            {/* ── Chart + Table (full width) ─────────────────────────────── */}
             {simResultado && (() => {
-              const { recomendacion } = simResultado
-              const lineaColor = { verde: '#22c55e', amarillo: '#eab308', rojo: '#ef4444' }[recomendacion]
-
+              const lineaColor = { verde: '#22c55e', amarillo: '#eab308', rojo: '#ef4444' }[simResultado.recomendacion]
               return (
                 <>
                   <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
@@ -2220,7 +2616,7 @@ function App() {
                       Posición Neta hora a hora — promedio del período
                     </h2>
                     <p className="mb-5 text-xs text-gray-500">
-                      Comparativo antes (azul) vs. después de incluir el nuevo contrato
+                      Posición actual (azul) vs. con el nuevo contrato (línea punteada)
                     </p>
                     <div className="h-72 w-full">
                       <ResponsiveContainer width="100%" height="100%">
@@ -2239,36 +2635,13 @@ function App() {
                           />
                           <YAxis stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 12 }} />
                           <Tooltip
-                            contentStyle={{
-                              backgroundColor: '#111827',
-                              border: '1px solid #374151',
-                              borderRadius: '8px',
-                              color: '#f3f4f6',
-                            }}
-                            labelFormatter={(hora) => `Hora: ${hora}`}
-                            formatter={(value, name) => [
-                              `${formatMiles(Number(value), 2)} MWh`,
-                              name,
-                            ]}
+                            contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '8px', color: '#f3f4f6' }}
+                            labelFormatter={(h) => `Hora: ${h}`}
+                            formatter={(v, n) => [`${formatMiles(Number(v), 2)} MWh`, n]}
                           />
                           <Legend wrapperStyle={{ color: '#9ca3af', paddingTop: 12 }} />
-                          <Line
-                            type="monotone"
-                            dataKey="posicion_antes_mwh"
-                            name="Posición actual"
-                            stroke="#3b82f6"
-                            strokeWidth={2}
-                            dot={false}
-                          />
-                          <Line
-                            type="monotone"
-                            dataKey="posicion_despues_mwh"
-                            name="Con nuevo contrato"
-                            stroke={lineaColor}
-                            strokeWidth={2.5}
-                            dot={false}
-                            strokeDasharray="6 3"
-                          />
+                          <Line type="monotone" dataKey="posicion_antes_mwh" name="Posición actual" stroke="#3b82f6" strokeWidth={2} dot={false} />
+                          <Line type="monotone" dataKey="posicion_despues_mwh" name="Con nuevo contrato" stroke={lineaColor} strokeWidth={2.5} dot={false} strokeDasharray="6 3" />
                         </LineChart>
                       </ResponsiveContainer>
                     </div>
@@ -2276,58 +2649,25 @@ function App() {
 
                   <section className="overflow-hidden rounded-xl border border-gray-800">
                     <div className="border-b border-gray-800 bg-gray-900/80 px-6 py-4">
-                      <h2 className="text-lg font-semibold text-gray-200">
-                        Resumen por mes
-                      </h2>
+                      <h2 className="text-lg font-semibold text-gray-200">Resumen por mes</h2>
                     </div>
                     <div className="bg-gray-900/40 px-6 py-5">
                       <TablaAnalisis
-                        encabezados={[
-                          'Mes',
-                          'Pos. Actual (MWh)',
-                          'Pos. Nueva (MWh)',
-                          'Diferencia (MWh)',
-                          'Costo Actual (M COP)',
-                          'Costo Nuevo (M COP)',
-                          'Ahorro (M COP)',
-                        ]}
+                        encabezados={['Mes', 'Pos. Actual (MWh)', 'Pos. Nueva (MWh)', 'Diferencia (MWh)', 'Costo Actual (M COP)', 'Costo Nuevo (M COP)', 'Ahorro (M COP)']}
                         filas={
                           <>
                             {simResultado.por_mes.map((fila) => (
-                              <tr
-                                key={fila.mes}
-                                className="transition-colors hover:bg-gray-800/40"
-                              >
-                                <td className="px-4 py-2.5 font-medium text-gray-200">
-                                  {fila.mes}
+                              <tr key={fila.mes} className="transition-colors hover:bg-gray-800/40">
+                                <td className="px-4 py-2.5 font-medium text-gray-200">{fila.mes}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-gray-300">{formatMiles(fila.pos_actual_mwh)}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-blue-300">{formatMiles(fila.pos_nueva_mwh)}</td>
+                                <td className={`px-4 py-2.5 text-right font-medium tabular-nums ${fila.diferencia_mwh <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                  {fila.diferencia_mwh > 0 ? '+' : ''}{formatMiles(fila.diferencia_mwh)}
                                 </td>
-                                <td className="px-4 py-2.5 text-right tabular-nums text-gray-300">
-                                  {formatMiles(fila.pos_actual_mwh)}
-                                </td>
-                                <td className="px-4 py-2.5 text-right tabular-nums text-blue-300">
-                                  {formatMiles(fila.pos_nueva_mwh)}
-                                </td>
-                                <td
-                                  className={`px-4 py-2.5 text-right font-medium tabular-nums ${
-                                    fila.diferencia_mwh <= 0 ? 'text-emerald-400' : 'text-red-400'
-                                  }`}
-                                >
-                                  {fila.diferencia_mwh > 0 ? '+' : ''}
-                                  {formatMiles(fila.diferencia_mwh)}
-                                </td>
-                                <td className="px-4 py-2.5 text-right tabular-nums text-gray-300">
-                                  {formatMiles(fila.costo_actual_mcop)}
-                                </td>
-                                <td className="px-4 py-2.5 text-right tabular-nums text-blue-300">
-                                  {formatMiles(fila.costo_nuevo_mcop)}
-                                </td>
-                                <td
-                                  className={`px-4 py-2.5 text-right font-semibold tabular-nums ${
-                                    fila.ahorro_mcop >= 0 ? 'text-emerald-400' : 'text-red-400'
-                                  }`}
-                                >
-                                  {fila.ahorro_mcop > 0 ? '+' : ''}
-                                  {formatMiles(fila.ahorro_mcop)}
+                                <td className="px-4 py-2.5 text-right tabular-nums text-gray-300">{formatMiles(fila.costo_actual_mcop)}</td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-blue-300">{formatMiles(fila.costo_nuevo_mcop)}</td>
+                                <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${fila.ahorro_mcop >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                  {fila.ahorro_mcop > 0 ? '+' : ''}{formatMiles(fila.ahorro_mcop)}
                                 </td>
                               </tr>
                             ))}
