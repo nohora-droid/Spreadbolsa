@@ -16,15 +16,11 @@ from pathlib import Path
 
 
 from fastapi import FastAPI, HTTPException, Query
-
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 import pandas as pd
 
-
-
 from dotenv import load_dotenv
-
-
 
 from spread_engine import calcular_spread, cargar_pb_sql
 from portfolio_engine import (
@@ -33,6 +29,7 @@ from portfolio_engine import (
     calcular_costo_bolsa,
     resumen_portafolio,
 )
+from simulation_engine import simular_contrato
 
 
 
@@ -417,3 +414,104 @@ def portfolio(
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Simulador de nuevos contratos
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ContratoSimulacion(BaseModel):
+    tipo: str = Field("compra", description="'compra' o 'venta'")
+    contraparte: str = Field("", description="Nombre libre de la contraparte")
+    energia_mensual_mwh: float = Field(..., gt=0, description="Energía en MWh/mes")
+    precio_cop_kwh: float = Field(..., gt=0, description="Precio del contrato en COP/kWh")
+    fecha_inicio: str = Field(..., description="Inicio de vigencia YYYY-MM-DD")
+    fecha_fin: str = Field(..., description="Fin de vigencia YYYY-MM-DD")
+    tipo_mercado: str = Field("regulado", description="'regulado', 'no_regulado' o 'ambos'")
+    perfil_horario: str = Field("plano", description="'plano', 'ordinario', 'sabado' o 'festivo'")
+
+
+@app.post("/simulate")
+def simulate(contrato: ContratoSimulacion):
+    """
+    Simula el impacto de un nuevo contrato sobre el portafolio Olibia.
+
+    Compara posición neta y costo de bolsa antes y después de incluir el contrato.
+    Retorna: resumen_antes, resumen_despues, recomendacion (verde/amarillo/rojo),
+    perfil_horario promedio (24h) y tabla por mes.
+    """
+    # Validar fechas
+    _validar_fecha_iso(contrato.fecha_inicio, "fecha_inicio")
+    _validar_fecha_iso(contrato.fecha_fin, "fecha_fin")
+    if contrato.fecha_inicio > contrato.fecha_fin:
+        raise HTTPException(
+            status_code=400,
+            detail="fecha_inicio no puede ser posterior a fecha_fin.",
+        )
+
+    # Validar enumeraciones
+    if contrato.tipo not in ("compra", "venta"):
+        raise HTTPException(status_code=400, detail="tipo debe ser 'compra' o 'venta'.")
+    if contrato.tipo_mercado not in ("regulado", "no_regulado", "ambos"):
+        raise HTTPException(
+            status_code=400,
+            detail="tipo_mercado debe ser 'regulado', 'no_regulado' o 'ambos'.",
+        )
+    if contrato.perfil_horario not in ("plano", "ordinario", "sabado", "festivo"):
+        raise HTTPException(
+            status_code=400,
+            detail="perfil_horario debe ser 'plano', 'ordinario', 'sabado' o 'festivo'.",
+        )
+
+    # Cargar inventario
+    ruta_raiz = Path(__file__).parent.parent
+    try:
+        inventario = cargar_inventario(ruta_raiz)
+    except Exception as error:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No fue posible cargar inventario: {error}",
+        ) from error
+
+    # Cargar precios de bolsa para el período de vigencia
+    try:
+        df_pb = cargar_pb_sql(
+            database_id=METABASE_DATABASE_PB,
+            fecha_inicio=contrato.fecha_inicio,
+            fecha_fin=contrato.fecha_fin,
+        )
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Error consultando Metabase para PB: {error}",
+        ) from error
+
+    if df_pb.empty:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay datos de PB para el rango de fechas del contrato.",
+        )
+
+    # Ejecutar simulación
+    try:
+        resultado = simular_contrato(
+            inventario=inventario,
+            df_pb=df_pb,
+            tipo=contrato.tipo,
+            energia_mensual_mwh=contrato.energia_mensual_mwh,
+            precio_cop_kwh=contrato.precio_cop_kwh,
+            fecha_inicio=contrato.fecha_inicio,
+            fecha_fin=contrato.fecha_fin,
+            tipo_mercado=contrato.tipo_mercado,
+            perfil_horario=contrato.perfil_horario,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Error en simulación: {error}",
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno en simulación: {error}",
+        ) from error
+
+    return resultado

@@ -14,6 +14,7 @@ import {
 
 const API_BASE = 'http://127.0.0.1:8000/spread'
 const API_PORTFOLIO = 'http://127.0.0.1:8000/portfolio'
+const API_SIMULATE = 'http://127.0.0.1:8000/simulate'
 
 const MESES_ES = [
   'Enero',
@@ -51,7 +52,11 @@ const COLORES_MES_COMPARATIVO = [
 ] as const
 
 type VistaAnalisis = 'dia' | 'mes' | 'comparativo'
-type DashboardTab = 'spread' | 'portafolio'
+type DashboardTab = 'spread' | 'portafolio' | 'simulador'
+type SimTipo = 'compra' | 'venta'
+type SimMercado = 'regulado' | 'no_regulado' | 'ambos'
+type SimPerfil = 'plano' | 'ordinario' | 'sabado' | 'festivo'
+type SimRecomendacion = 'verde' | 'amarillo' | 'rojo'
 
 interface FilaSpread {
   fecha: string
@@ -105,6 +110,38 @@ interface PortfolioResumen {
   costo_bolsa_total_cop: number
   hora_pico_compra: number | null
   hora_pico_venta: number | null
+}
+
+interface SimResumen {
+  posicion_neta_total_mwh: number
+  costo_bolsa_total_mcop: number
+  hora_pico_compra: number
+  hora_pico_venta: number
+}
+
+interface SimPerfilHora {
+  hora: number
+  posicion_antes_mwh: number
+  posicion_despues_mwh: number
+}
+
+interface SimMes {
+  mes: string
+  pos_actual_mwh: number
+  pos_nueva_mwh: number
+  diferencia_mwh: number
+  costo_actual_mcop: number
+  costo_nuevo_mcop: number
+  ahorro_mcop: number
+}
+
+interface SimResultado {
+  resumen_antes: SimResumen
+  resumen_despues: SimResumen
+  recomendacion: SimRecomendacion
+  delta_costo_mcop: number
+  perfil_horario: SimPerfilHora[]
+  por_mes: SimMes[]
 }
 
 function formatNumero(valor: number, decimales = 2): string {
@@ -403,6 +440,21 @@ function App() {
   const [portfolioFiltroMes, setPortfolioFiltroMes] = useState('')
   const [portfolioFiltroTipoDia, setPortfolioFiltroTipoDia] = useState('todos')
 
+  // ── Simulador ──────────────────────────────────────────────────────────────
+  const [simTipo, setSimTipo] = useState<SimTipo>('compra')
+  const [simContraparte, setSimContraparte] = useState('')
+  const [simEnergiaMwh, setSimEnergiaMwh] = useState(1000)
+  const [simPrecio, setSimPrecio] = useState(350)
+  const [simFechaInicio, setSimFechaInicio] = useState('2026-01-01')
+  const [simFechaFin, setSimFechaFin] = useState(
+    () => new Date().toISOString().split('T')[0],
+  )
+  const [simTipoMercado, setSimTipoMercado] = useState<SimMercado>('regulado')
+  const [simPerfil, setSimPerfil] = useState<SimPerfil>('plano')
+  const [simResultado, setSimResultado] = useState<SimResultado | null>(null)
+  const [simCargando, setSimCargando] = useState(false)
+  const [simError, setSimError] = useState<string | null>(null)
+
   const datosConSpread = useMemo(() => {
     return datos.map((d) => ({
       ...d,
@@ -567,6 +619,43 @@ function App() {
 
   function handleCalcularPortafolio() {
     cargarPortafolio(portfolioFechaInicio, portfolioFechaFin)
+  }
+
+  async function cargarSimulacion() {
+    try {
+      setSimCargando(true)
+      setSimError(null)
+      const body = {
+        tipo: simTipo,
+        contraparte: simContraparte,
+        energia_mensual_mwh: simEnergiaMwh,
+        precio_cop_kwh: simPrecio,
+        fecha_inicio: simFechaInicio,
+        fecha_fin: simFechaFin,
+        tipo_mercado: simTipoMercado,
+        perfil_horario: simPerfil,
+      }
+      const respuesta = await fetch(API_SIMULATE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!respuesta.ok) {
+        const cuerpo = await respuesta.json().catch(() => null)
+        throw new Error(
+          typeof cuerpo?.detail === 'string'
+            ? cuerpo.detail
+            : `Error ${respuesta.status}`,
+        )
+      }
+      const json: SimResultado = await respuesta.json()
+      setSimResultado(json)
+    } catch (err) {
+      setSimError(err instanceof Error ? err.message : 'Error al simular')
+      setSimResultado(null)
+    } finally {
+      setSimCargando(false)
+    }
   }
 
   function toggleMesComparativo(mes: string) {
@@ -871,6 +960,7 @@ function App() {
               [
                 ['spread', 'Spread PB'],
                 ['portafolio', 'Portafolio'],
+                ['simulador', 'Simulador'],
               ] as const
             ).map(([id, label]) => (
               <button
@@ -1853,6 +1943,404 @@ function App() {
             </section>
           </>
         )}
+
+        {/* ══════════════════════════════════════════════════════════════════
+            TAB: SIMULADOR
+        ══════════════════════════════════════════════════════════════════ */}
+        {tabActiva === 'simulador' && (
+          <>
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
+
+              {/* ── Panel izquierdo: formulario ──────────────────────────── */}
+              <div className="lg:col-span-2">
+                <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
+                  <h2 className="mb-5 text-lg font-semibold text-gray-200">
+                    Nuevo contrato
+                  </h2>
+
+                  {/* Tipo Compra / Venta */}
+                  <div className="mb-5">
+                    <label className="mb-2 block text-sm font-medium text-gray-400">
+                      Tipo de operación
+                    </label>
+                    <div className="inline-flex w-full rounded-lg border border-gray-700 bg-gray-950 p-1">
+                      {(['compra', 'venta'] as SimTipo[]).map((t) => (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() => setSimTipo(t)}
+                          className={`flex-1 rounded-md py-2 text-sm font-semibold capitalize transition ${
+                            simTipo === t
+                              ? t === 'compra'
+                                ? 'bg-blue-600 text-white shadow-sm'
+                                : 'bg-rose-600 text-white shadow-sm'
+                              : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+                          }`}
+                        >
+                          {t === 'compra' ? '↓ Compra' : '↑ Venta'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Contraparte */}
+                  <div className="mb-4">
+                    <label className="mb-1.5 block text-sm font-medium text-gray-400">
+                      Contraparte
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Nombre de la contraparte"
+                      value={simContraparte}
+                      onChange={(e) => setSimContraparte(e.target.value)}
+                      className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 placeholder-gray-600 outline-none transition focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                    />
+                  </div>
+
+                  {/* Energía + Precio */}
+                  <div className="mb-4 grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-gray-400">
+                        Energía (MWh/mes)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={simEnergiaMwh}
+                        onChange={(e) =>
+                          setSimEnergiaMwh(Math.max(1, Number(e.target.value) || 1))
+                        }
+                        className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 outline-none transition focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-gray-400">
+                        Precio (COP/kWh)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={simPrecio}
+                        onChange={(e) =>
+                          setSimPrecio(Math.max(1, Number(e.target.value) || 1))
+                        }
+                        className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 outline-none transition focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Fechas vigencia */}
+                  <div className="mb-4 grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-gray-400">
+                        Inicio vigencia
+                      </label>
+                      <input
+                        type="date"
+                        min="2010-01-01"
+                        value={simFechaInicio}
+                        onChange={(e) => setSimFechaInicio(e.target.value)}
+                        className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-gray-400">
+                        Fin vigencia
+                      </label>
+                      <input
+                        type="date"
+                        value={simFechaFin}
+                        onChange={(e) => setSimFechaFin(e.target.value)}
+                        className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Tipo mercado */}
+                  <div className="mb-4">
+                    <label className="mb-1.5 block text-sm font-medium text-gray-400">
+                      Tipo de mercado
+                    </label>
+                    <select
+                      value={simTipoMercado}
+                      onChange={(e) => setSimTipoMercado(e.target.value as SimMercado)}
+                      className={CLASE_SELECT + ' w-full'}
+                    >
+                      <option value="regulado">Regulado (Compra R)</option>
+                      <option value="no_regulado">No Regulado (Compra NR)</option>
+                      <option value="ambos">Ambos (50 % R + 50 % NR)</option>
+                    </select>
+                  </div>
+
+                  {/* Perfil horario */}
+                  <div className="mb-6">
+                    <label className="mb-1.5 block text-sm font-medium text-gray-400">
+                      Perfil horario
+                    </label>
+                    <select
+                      value={simPerfil}
+                      onChange={(e) => setSimPerfil(e.target.value as SimPerfil)}
+                      className={CLASE_SELECT + ' w-full'}
+                    >
+                      <option value="plano">Plano (uniforme 24h)</option>
+                      <option value="ordinario">Ordinario (curva laboral)</option>
+                      <option value="sabado">Sábado</option>
+                      <option value="festivo">Festivo / Domingo</option>
+                    </select>
+                    <p className="mt-1.5 text-xs text-gray-600">
+                      Plano distribuye igual en cada hora. Los perfiles
+                      con forma usan las curvas del inventario Olibia.
+                    </p>
+                  </div>
+
+                  {/* Botón */}
+                  <button
+                    type="button"
+                    onClick={cargarSimulacion}
+                    disabled={simCargando}
+                    className="w-full rounded-lg bg-emerald-600 py-3 text-sm font-bold text-white shadow transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {simCargando ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                        Simulando…
+                      </span>
+                    ) : (
+                      '⚡ Simular impacto'
+                    )}
+                  </button>
+
+                  {simError && (
+                    <div className="mt-4 rounded-lg border border-red-900/50 bg-red-950/30 px-4 py-3 text-sm text-red-400">
+                      {simError}
+                    </div>
+                  )}
+                </section>
+              </div>
+
+              {/* ── Panel derecho: resultados ────────────────────────────── */}
+              <div className="space-y-6 lg:col-span-3">
+                {!simResultado && !simCargando && (
+                  <div className="flex h-64 items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30 text-sm text-gray-500">
+                    Configura el contrato y pulsa «Simular impacto» para ver los resultados.
+                  </div>
+                )}
+
+                {simResultado && (() => {
+                  const { resumen_antes: ra, resumen_despues: rd, recomendacion, delta_costo_mcop } = simResultado
+
+                  const semCfg: Record<SimRecomendacion, { bg: string; textColor: string; icon: string; titulo: string; desc: string }> = {
+                    verde: {
+                      bg: 'border-emerald-500/40 bg-emerald-500/10',
+                      textColor: 'text-emerald-400',
+                      icon: '✓',
+                      titulo: 'CONVIENE',
+                      desc: 'El contrato mejora la posición del portafolio y reduce el costo de bolsa.',
+                    },
+                    amarillo: {
+                      bg: 'border-amber-500/40 bg-amber-500/10',
+                      textColor: 'text-amber-400',
+                      icon: '⚠',
+                      titulo: 'EVALUAR',
+                      desc: 'Impacto mixto: el contrato mejora algunos indicadores pero no todos.',
+                    },
+                    rojo: {
+                      bg: 'border-red-500/40 bg-red-500/10',
+                      textColor: 'text-red-400',
+                      icon: '✗',
+                      titulo: 'NO CONVIENE',
+                      desc: 'El contrato empeora la posición y aumenta el costo de bolsa.',
+                    },
+                  }
+                  const sem = semCfg[recomendacion]
+                  const lineaColor = { verde: '#22c55e', amarillo: '#eab308', rojo: '#ef4444' }[recomendacion]
+
+                  return (
+                    <>
+                      {/* Semáforo */}
+                      <div className={`rounded-xl border px-5 py-4 ${sem.bg}`}>
+                        <div className="flex items-center gap-3">
+                          <span className={`text-2xl font-bold ${sem.textColor}`}>{sem.icon}</span>
+                          <div>
+                            <p className={`text-base font-bold ${sem.textColor}`}>{sem.titulo}</p>
+                            <p className="text-sm text-gray-400">{sem.desc}</p>
+                          </div>
+                          <span className={`ml-auto text-right text-sm font-semibold tabular-nums ${delta_costo_mcop < 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {delta_costo_mcop < 0 ? '▼' : '▲'} {Math.abs(delta_costo_mcop).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} M COP
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* 4 KPI cards comparativas */}
+                      <div className="grid grid-cols-2 gap-3">
+                        <SimCompareCard
+                          label="Posición Neta (MWh)"
+                          antes={ra.posicion_neta_total_mwh}
+                          despues={rd.posicion_neta_total_mwh}
+                          formato={(v) => formatMiles(v, 0)}
+                          mejoraSiMenor={simTipo === 'venta'}
+                        />
+                        <SimCompareCard
+                          label="Costo/Ingreso Bolsa (M COP)"
+                          antes={ra.costo_bolsa_total_mcop}
+                          despues={rd.costo_bolsa_total_mcop}
+                          formato={(v) => formatMiles(v, 2)}
+                          mejoraSiMenor
+                        />
+                        <SimCompareCard
+                          label="Hora pico compra"
+                          antes={ra.hora_pico_compra}
+                          despues={rd.hora_pico_compra}
+                          formato={(v) => `H${v}`}
+                          soloInfo
+                        />
+                        <SimCompareCard
+                          label="Hora pico venta"
+                          antes={ra.hora_pico_venta}
+                          despues={rd.hora_pico_venta}
+                          formato={(v) => `H${v}`}
+                          soloInfo
+                        />
+                      </div>
+                    </>
+                  )
+                })()}
+              </div>
+            </div>
+
+            {/* ── Gráfica comparativa + tabla (ancho completo) ──────────── */}
+            {simResultado && (() => {
+              const { recomendacion } = simResultado
+              const lineaColor = { verde: '#22c55e', amarillo: '#eab308', rojo: '#ef4444' }[recomendacion]
+
+              return (
+                <>
+                  <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
+                    <h2 className="mb-1 text-lg font-semibold text-gray-200">
+                      Posición Neta hora a hora — promedio del período
+                    </h2>
+                    <p className="mb-5 text-xs text-gray-500">
+                      Comparativo antes (azul) vs. después de incluir el nuevo contrato
+                    </p>
+                    <div className="h-72 w-full">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart
+                          data={simResultado.perfil_horario}
+                          margin={{ top: 8, right: 16, left: 0, bottom: 8 }}
+                        >
+                          <CartesianGrid stroke="#374151" strokeDasharray="3 3" />
+                          <XAxis
+                            dataKey="hora"
+                            type="number"
+                            domain={[1, 24]}
+                            ticks={Array.from({ length: 24 }, (_, i) => i + 1)}
+                            stroke="#9ca3af"
+                            tick={{ fill: '#9ca3af', fontSize: 12 }}
+                          />
+                          <YAxis stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 12 }} />
+                          <Tooltip
+                            contentStyle={{
+                              backgroundColor: '#111827',
+                              border: '1px solid #374151',
+                              borderRadius: '8px',
+                              color: '#f3f4f6',
+                            }}
+                            labelFormatter={(hora) => `Hora: ${hora}`}
+                            formatter={(value, name) => [
+                              `${formatMiles(Number(value), 2)} MWh`,
+                              name,
+                            ]}
+                          />
+                          <Legend wrapperStyle={{ color: '#9ca3af', paddingTop: 12 }} />
+                          <Line
+                            type="monotone"
+                            dataKey="posicion_antes_mwh"
+                            name="Posición actual"
+                            stroke="#3b82f6"
+                            strokeWidth={2}
+                            dot={false}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="posicion_despues_mwh"
+                            name="Con nuevo contrato"
+                            stroke={lineaColor}
+                            strokeWidth={2.5}
+                            dot={false}
+                            strokeDasharray="6 3"
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </section>
+
+                  <section className="overflow-hidden rounded-xl border border-gray-800">
+                    <div className="border-b border-gray-800 bg-gray-900/80 px-6 py-4">
+                      <h2 className="text-lg font-semibold text-gray-200">
+                        Resumen por mes
+                      </h2>
+                    </div>
+                    <div className="bg-gray-900/40 px-6 py-5">
+                      <TablaAnalisis
+                        encabezados={[
+                          'Mes',
+                          'Pos. Actual (MWh)',
+                          'Pos. Nueva (MWh)',
+                          'Diferencia (MWh)',
+                          'Costo Actual (M COP)',
+                          'Costo Nuevo (M COP)',
+                          'Ahorro (M COP)',
+                        ]}
+                        filas={
+                          <>
+                            {simResultado.por_mes.map((fila) => (
+                              <tr
+                                key={fila.mes}
+                                className="transition-colors hover:bg-gray-800/40"
+                              >
+                                <td className="px-4 py-2.5 font-medium text-gray-200">
+                                  {fila.mes}
+                                </td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-gray-300">
+                                  {formatMiles(fila.pos_actual_mwh)}
+                                </td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-blue-300">
+                                  {formatMiles(fila.pos_nueva_mwh)}
+                                </td>
+                                <td
+                                  className={`px-4 py-2.5 text-right font-medium tabular-nums ${
+                                    fila.diferencia_mwh <= 0 ? 'text-emerald-400' : 'text-red-400'
+                                  }`}
+                                >
+                                  {fila.diferencia_mwh > 0 ? '+' : ''}
+                                  {formatMiles(fila.diferencia_mwh)}
+                                </td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-gray-300">
+                                  {formatMiles(fila.costo_actual_mcop)}
+                                </td>
+                                <td className="px-4 py-2.5 text-right tabular-nums text-blue-300">
+                                  {formatMiles(fila.costo_nuevo_mcop)}
+                                </td>
+                                <td
+                                  className={`px-4 py-2.5 text-right font-semibold tabular-nums ${
+                                    fila.ahorro_mcop >= 0 ? 'text-emerald-400' : 'text-red-400'
+                                  }`}
+                                >
+                                  {fila.ahorro_mcop > 0 ? '+' : ''}
+                                  {formatMiles(fila.ahorro_mcop)}
+                                </td>
+                              </tr>
+                            ))}
+                          </>
+                        }
+                      />
+                    </div>
+                  </section>
+                </>
+              )
+            })()}
+          </>
+        )}
       </main>
     </div>
   )
@@ -1945,6 +2433,55 @@ function MetricCard({
           </span>
         )}
       </p>
+    </div>
+  )
+}
+
+function SimCompareCard({
+  label,
+  antes,
+  despues,
+  formato,
+  mejoraSiMenor = false,
+  soloInfo = false,
+}: {
+  label: string
+  antes: number
+  despues: number
+  formato: (v: number) => string
+  mejoraSiMenor?: boolean
+  soloInfo?: boolean
+}) {
+  const delta = despues - antes
+  const sinCambio = delta === 0
+  let colorDelta = 'text-gray-500'
+  if (!soloInfo && !sinCambio) {
+    const mejora = mejoraSiMenor ? delta < 0 : delta > 0
+    colorDelta = mejora ? 'text-emerald-400' : 'text-red-400'
+  }
+  const signo = delta > 0 ? '+' : ''
+
+  return (
+    <div className="rounded-xl border border-gray-800 bg-gray-900 p-4">
+      <p className="mb-3 text-xs font-medium uppercase tracking-wider text-gray-500">
+        {label}
+      </p>
+      <div className="flex items-center gap-2">
+        <span className="text-base font-semibold tabular-nums text-gray-400">
+          {formato(antes)}
+        </span>
+        <span className="text-gray-600">→</span>
+        <span className="text-lg font-bold tabular-nums text-gray-100">
+          {formato(despues)}
+        </span>
+      </div>
+      {!soloInfo && (
+        <p className={`mt-1 text-sm font-medium tabular-nums ${colorDelta}`}>
+          {sinCambio
+            ? 'Sin cambio'
+            : `${signo}${formato(delta)}`}
+        </p>
+      )}
     </div>
   )
 }
