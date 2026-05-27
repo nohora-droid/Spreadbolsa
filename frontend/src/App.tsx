@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
+  Bar,
+  BarChart,
   CartesianGrid,
   Legend,
   Line,
@@ -11,6 +13,7 @@ import {
 } from 'recharts'
 
 const API_BASE = 'http://127.0.0.1:8000/spread'
+const API_PORTFOLIO = 'http://127.0.0.1:8000/portfolio'
 
 const MESES_ES = [
   'Enero',
@@ -48,6 +51,7 @@ const COLORES_MES_COMPARATIVO = [
 ] as const
 
 type VistaAnalisis = 'dia' | 'mes' | 'comparativo'
+type DashboardTab = 'spread' | 'portafolio'
 
 interface FilaSpread {
   fecha: string
@@ -83,6 +87,24 @@ interface FilaHoraMes {
   precio_contrato: number
   spread: number | null
   percentiles: { p10: number; p50: number; p90: number } | null
+}
+
+interface FilaPortfolio {
+  fecha: string
+  hora: number
+  tipo_dia?: string
+  compra_r: number
+  compra_nr: number
+  venta: number
+  posicion_neta: number
+  costo_bolsa: number
+}
+
+interface PortfolioResumen {
+  posicion_neta_total_kwh: number
+  costo_bolsa_total_cop: number
+  hora_pico_compra: number | null
+  hora_pico_venta: number | null
 }
 
 function formatNumero(valor: number, decimales = 2): string {
@@ -237,6 +259,111 @@ function pbPromedioPorHoraMes(
   })
 }
 
+function formatNumeroMillonesCOP(valor: number): string {
+  return formatNumero(valor / 1_000_000, 2)
+}
+
+function formatMiles(valor: number, decimales = 2): string {
+  return valor.toLocaleString('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: decimales,
+  })
+}
+
+function _dateToIso(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function _fechaPascua(anio: number): Date {
+  const a = anio % 19, b = Math.floor(anio / 100), c = anio % 100
+  const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25)
+  const g = Math.floor((b - f + 1) / 3)
+  const h = (19 * a + b - d - g + 15) % 30
+  const i = Math.floor(c / 4), k = c % 4
+  const l = (32 + 2 * e + 2 * i - h - k) % 7
+  const m = Math.floor((a + 11 * h + 22 * l) / 451)
+  const mes = Math.floor((h + l - 7 * m + 114) / 31)
+  const dia = ((h + l - 7 * m + 114) % 31) + 1
+  return new Date(anio, mes - 1, dia)
+}
+
+function _addDias(d: Date, n: number): Date {
+  const r = new Date(d); r.setDate(r.getDate() + n); return r
+}
+
+function _siguienteLunes(d: Date): Date {
+  const r = new Date(d); r.setDate(r.getDate() + (8 - r.getDay()) % 7); return r
+}
+
+const _cacheFestivos = new Map<number, Set<string>>()
+
+function festivosColombia(anio: number): Set<string> {
+  if (_cacheFestivos.has(anio)) return _cacheFestivos.get(anio)!
+  const pascua = _fechaPascua(anio)
+  const f = new Set<string>()
+  const fijos: [number, number][] = [[1,1],[5,1],[7,20],[8,7],[12,8],[12,25]]
+  for (const [mes, dia] of fijos)
+    f.add(`${anio}-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`)
+  const emiliani = [
+    new Date(anio,0,6),  new Date(anio,2,19), new Date(anio,5,29),
+    new Date(anio,7,15), new Date(anio,9,12), new Date(anio,10,1), new Date(anio,10,11),
+  ]
+  for (const base of emiliani) f.add(_dateToIso(_siguienteLunes(base)))
+  f.add(_dateToIso(_addDias(pascua, -3)))
+  f.add(_dateToIso(_addDias(pascua, -2)))
+  f.add(_dateToIso(_siguienteLunes(_addDias(pascua, 43))))
+  f.add(_dateToIso(_siguienteLunes(_addDias(pascua, 64))))
+  f.add(_dateToIso(_siguienteLunes(_addDias(pascua, 71))))
+  _cacheFestivos.set(anio, f)
+  return f
+}
+
+function tipoDiaDesdefecha(fechaStr: string): string {
+  const dt = parseFecha(fechaStr)
+  if (!dt) return 'Ordinario'
+  if (festivosColombia(dt.getFullYear()).has(normalizarFecha(fechaStr))) return 'Festivo'
+  const dow = dt.getDay()
+  if (dow === 0) return 'Domingo'
+  if (dow === 6) return 'Sábado'
+  return 'Ordinario'
+}
+
+function parseNumero(valor: unknown): number {
+  if (typeof valor === 'number') return Number.isFinite(valor) ? valor : 0
+  if (typeof valor === 'string') {
+    const n = Number(valor)
+    return Number.isFinite(n) ? n : 0
+  }
+  return 0
+}
+
+function parseFilaPortfolio(valor: unknown): FilaPortfolio | null {
+  if (!valor || typeof valor !== 'object') return null
+  const fila = valor as Record<string, unknown>
+  const hora = parseNumero(fila.hora)
+  if (hora < 1 || hora > 24) return null
+  const compraR = parseNumero(fila.compra_r_kwh)
+  const compraNr = parseNumero(fila.compra_nr_kwh)
+  const venta = parseNumero(fila.venta_kwh)
+  const posicionNeta =
+    fila.posicion_neta_kwh != null
+      ? parseNumero(fila.posicion_neta_kwh)
+      : compraR + compraNr - venta
+  return {
+    fecha: String(fila.fecha ?? ''),
+    hora,
+    tipo_dia:
+      typeof fila.tipo_dia === 'string' && fila.tipo_dia.trim() !== ''
+        ? fila.tipo_dia
+        : undefined,
+    compra_r: compraR,
+    compra_nr: compraNr,
+    venta,
+    posicion_neta: posicionNeta,
+    costo_bolsa: parseNumero(fila.costo_bolsa_cop),
+  }
+}
+
 function claseSpread(
   spread: number | null,
   posicion: 'vendedor' | 'comprador',
@@ -249,9 +376,10 @@ function claseSpread(
 }
 
 function App() {
+  const [tabActiva, setTabActiva] = useState<DashboardTab>('spread')
   const [posicion, setPosicion] = useState<'vendedor' | 'comprador'>('vendedor')
   const [precioContrato, setPrecioContrato] = useState(350)
-  const [fechaInicio, setFechaInicio] = useState('2026-01-01')
+  const [fechaInicio, setFechaInicio] = useState('2010-01-01')
   const [fechaFin, setFechaFin] = useState(
     () => new Date().toISOString().split('T')[0],
   )
@@ -265,6 +393,15 @@ function App() {
   const [fechaSeleccionada, setFechaSeleccionada] = useState('')
   const [mesSeleccionado, setMesSeleccionado] = useState('')
   const [mesesComparativo, setMesesComparativo] = useState<string[]>([])
+  const [portfolioFechaInicio, setPortfolioFechaInicio] = useState('2010-01-01')
+  const [portfolioFechaFin, setPortfolioFechaFin] = useState(
+    () => new Date().toISOString().split('T')[0],
+  )
+  const [portfolioCargando, setPortfolioCargando] = useState(false)
+  const [portfolioError, setPortfolioError] = useState<string | null>(null)
+  const [portfolioDatos, setPortfolioDatos] = useState<FilaPortfolio[]>([])
+  const [portfolioFiltroMes, setPortfolioFiltroMes] = useState('')
+  const [portfolioFiltroTipoDia, setPortfolioFiltroTipoDia] = useState('todos')
 
   const datosConSpread = useMemo(() => {
     return datos.map((d) => ({
@@ -374,9 +511,50 @@ function App() {
     }
   }
 
+  async function cargarPortafolio(
+    inicio: string,
+    fin: string,
+    signal?: AbortSignal,
+  ) {
+    try {
+      setPortfolioCargando(true)
+      setPortfolioError(null)
+
+      const respuesta = await fetch(
+        `${API_PORTFOLIO}?fecha_inicio=${inicio}&fecha_fin=${fin}`,
+        { signal },
+      )
+
+      if (!respuesta.ok) {
+        const cuerpo = await respuesta.json().catch(() => null)
+        const detalle =
+          cuerpo && typeof cuerpo.detail === 'string'
+            ? cuerpo.detail
+            : `Error ${respuesta.status}`
+        throw new Error(detalle)
+      }
+
+      const json = await respuesta.json()
+      const candidatos = Array.isArray(json?.datos)
+        ? json.datos
+        : Array.isArray(json)
+          ? json
+          : []
+      setPortfolioDatos(candidatos.map(parseFilaPortfolio).filter(Boolean) as FilaPortfolio[])
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') return
+      setPortfolioError(
+        err instanceof Error ? err.message : 'No se pudieron cargar los datos',
+      )
+      setPortfolioDatos([])
+    } finally {
+      setPortfolioCargando(false)
+    }
+  }
+
   useEffect(() => {
     const controller = new AbortController()
-    cargarSpread(350, '2026-01-01', new Date().toISOString().split('T')[0], {
+    cargarSpread(350, '2010-01-01', new Date().toISOString().split('T')[0], {
       inicial: true,
       signal: controller.signal,
     })
@@ -385,6 +563,10 @@ function App() {
 
   function handleCalcular() {
     cargarSpread(precioContrato, fechaInicio, fechaFin)
+  }
+
+  function handleCalcularPortafolio() {
+    cargarPortafolio(portfolioFechaInicio, portfolioFechaFin)
   }
 
   function toggleMesComparativo(mes: string) {
@@ -498,6 +680,149 @@ function App() {
       ? 'Spread promedio del mes'
       : 'Exposición promedio del mes'
 
+  const portfolioResumen = useMemo<PortfolioResumen | null>(() => {
+    if (portfolioDatos.length === 0) return null
+    const posicion_neta_total_kwh = portfolioDatos.reduce(
+      (sum, f) => sum + f.posicion_neta,
+      0,
+    )
+    const costo_bolsa_total_cop = portfolioDatos.reduce(
+      (sum, f) => sum + f.costo_bolsa,
+      0,
+    )
+    const porHora = Array.from({ length: 24 }, (_, i) => i + 1).map((hora) => {
+      const filas = portfolioDatos.filter((f) => f.hora === hora)
+      if (filas.length === 0) return { hora, compra: 0, venta: 0 }
+      return {
+        hora,
+        compra: filas.reduce((s, f) => s + f.compra_r + f.compra_nr, 0) / filas.length,
+        venta: filas.reduce((s, f) => s + f.venta, 0) / filas.length,
+      }
+    })
+    const horaPicoCompra = porHora.reduce((a, b) => (a.compra >= b.compra ? a : b))
+    const horaPicoVenta = porHora.reduce((a, b) => (a.venta >= b.venta ? a : b))
+    return {
+      posicion_neta_total_kwh,
+      costo_bolsa_total_cop,
+      hora_pico_compra: horaPicoCompra.compra > 0 ? horaPicoCompra.hora : null,
+      hora_pico_venta: horaPicoVenta.venta > 0 ? horaPicoVenta.hora : null,
+    }
+  }, [portfolioDatos])
+
+  const portfolioPorHora = useMemo(() => {
+    return Array.from({ length: 24 }, (_, i) => {
+      const hora = i + 1
+      const filas = portfolioDatos.filter((f) => f.hora === hora)
+      if (filas.length === 0) {
+        return { hora, compra_r: 0, compra_nr: 0, venta: 0, posicion_neta: 0 }
+      }
+      return {
+        hora,
+        compra_r: filas.reduce((s, f) => s + f.compra_r, 0) / filas.length / 1000,
+        compra_nr: filas.reduce((s, f) => s + f.compra_nr, 0) / filas.length / 1000,
+        venta: filas.reduce((s, f) => s + f.venta, 0) / filas.length / 1000,
+        posicion_neta: filas.reduce((s, f) => s + f.posicion_neta, 0) / filas.length / 1000,
+      }
+    })
+  }, [portfolioDatos])
+
+  const portfolioResumenDiario = useMemo(() => {
+    const mapa = new Map<string, FilaPortfolio[]>()
+    for (const fila of portfolioDatos) {
+      const fecha = normalizarFecha(fila.fecha)
+      const acumulado = mapa.get(fecha) ?? []
+      acumulado.push(fila)
+      mapa.set(fecha, acumulado)
+    }
+    return [...mapa.entries()]
+      .map(([fecha, filas]) => {
+        const compraR = filas.reduce((s, f) => s + f.compra_r, 0) / 1000
+        const compraNr = filas.reduce((s, f) => s + f.compra_nr, 0) / 1000
+        const venta = filas.reduce((s, f) => s + f.venta, 0) / 1000
+        const posicionNeta = filas.reduce((s, f) => s + f.posicion_neta, 0) / 1000
+        const costoBolsa = filas.reduce((s, f) => s + f.costo_bolsa, 0) / 1_000_000
+        const tipoDia = tipoDiaDesdefecha(fecha)
+        return { fecha, tipoDia, compraR, compraNr, venta, posicionNeta, costoBolsa }
+      })
+      .sort((a, b) => a.fecha.localeCompare(b.fecha))
+  }, [portfolioDatos])
+
+  const portfolioMesesDisponibles = useMemo(() => {
+    const meses = new Set<string>()
+    for (const fila of portfolioResumenDiario) meses.add(fila.fecha.slice(0, 7))
+    return [...meses].sort()
+  }, [portfolioResumenDiario])
+
+  const portfolioResumenDiarioFiltrado = useMemo(() => {
+    return portfolioResumenDiario.filter((fila) => {
+      const mesOk = !portfolioFiltroMes || fila.fecha.startsWith(portfolioFiltroMes)
+      const tipoDiaOk =
+        portfolioFiltroTipoDia === 'todos' || fila.tipoDia === portfolioFiltroTipoDia
+      return mesOk && tipoDiaOk
+    })
+  }, [portfolioResumenDiario, portfolioFiltroMes, portfolioFiltroTipoDia])
+
+  const portfolioTotalesFiltrados = useMemo(() => {
+    if (portfolioResumenDiarioFiltrado.length === 0) return null
+    return portfolioResumenDiarioFiltrado.reduce(
+      (acc, f) => ({
+        compraR: acc.compraR + f.compraR,
+        compraNr: acc.compraNr + f.compraNr,
+        venta: acc.venta + f.venta,
+        posicionNeta: acc.posicionNeta + f.posicionNeta,
+        costoBolsa: acc.costoBolsa + f.costoBolsa,
+      }),
+      { compraR: 0, compraNr: 0, venta: 0, posicionNeta: 0, costoBolsa: 0 },
+    )
+  }, [portfolioResumenDiarioFiltrado])
+
+  const perfilHorarioPorTipoDia = useMemo(() => {
+    const filtradas = portfolioFiltroMes
+      ? portfolioDatos.filter((f) => normalizarFecha(f.fecha).startsWith(portfolioFiltroMes))
+      : portfolioDatos
+
+    const init24 = () =>
+      Array.from({ length: 24 }, () => ({ compra: [] as number[], venta: [] as number[] }))
+
+    const acum = { ordinario: init24(), sabado: init24(), domfest: init24() }
+
+    for (const fila of filtradas) {
+      const tipo = tipoDiaDesdefecha(fila.fecha)
+      const balde =
+        tipo === 'Sábado'
+          ? acum.sabado
+          : tipo === 'Domingo' || tipo === 'Festivo'
+            ? acum.domfest
+            : acum.ordinario
+      const idx = fila.hora - 1
+      if (idx < 0 || idx > 23) continue
+      balde[idx].compra.push((fila.compra_r + fila.compra_nr) / 1000)
+      balde[idx].venta.push(fila.venta / 1000)
+    }
+
+    const avg = (arr: number[]) =>
+      arr.length > 0 ? arr.reduce((s, v) => s + v, 0) / arr.length : null
+
+    return Array.from({ length: 24 }, (_, i) => ({
+      hora: i + 1,
+      ordinario_compra: avg(acum.ordinario[i].compra),
+      ordinario_venta: avg(acum.ordinario[i].venta),
+      sabado_compra: avg(acum.sabado[i].compra),
+      sabado_venta: avg(acum.sabado[i].venta),
+      domfest_compra: avg(acum.domfest[i].compra),
+      domfest_venta: avg(acum.domfest[i].venta),
+    }))
+  }, [portfolioDatos, portfolioFiltroMes])
+
+  useEffect(() => {
+    if (portfolioMesesDisponibles.length === 0) return
+    setPortfolioFiltroMes((prev) =>
+      prev && portfolioMesesDisponibles.includes(prev)
+        ? prev
+        : portfolioMesesDisponibles[portfolioMesesDisponibles.length - 1],
+    )
+  }, [portfolioMesesDisponibles])
+
   if (cargando) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-gray-950">
@@ -540,7 +865,33 @@ function App() {
       </header>
 
       <main className="mx-auto max-w-7xl space-y-8 px-6 py-8">
-        <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
+        <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-2">
+          <div className="inline-flex rounded-lg border border-gray-700 bg-gray-950 p-1">
+            {(
+              [
+                ['spread', 'Spread PB'],
+                ['portafolio', 'Portafolio'],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setTabActiva(id)}
+                className={`rounded-md px-5 py-2 text-sm font-semibold tracking-wide transition ${
+                  tabActiva === id
+                    ? 'bg-emerald-600 text-white shadow-sm shadow-emerald-900/50'
+                    : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {tabActiva === 'spread' && (
+          <>
+            <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
           <div className="flex flex-wrap items-end gap-4">
             <div className="flex min-w-[200px] flex-1 flex-col gap-2 sm:max-w-xs">
               <label
@@ -596,6 +947,7 @@ function App() {
               <input
                 id="fecha-inicio"
                 type="date"
+                min="2010-01-01"
                 value={fechaInicio}
                 onChange={(e) => setFechaInicio(e.target.value)}
                 className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
@@ -1058,7 +1410,449 @@ function App() {
               </div>
             )}
           </div>
-        </section>
+            </section>
+          </>
+        )}
+
+        {tabActiva === 'portafolio' && (
+          <>
+            <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
+              <div className="flex flex-wrap items-end gap-4">
+                <div className="flex min-w-[160px] flex-col gap-2">
+                  <label
+                    htmlFor="portfolio-fecha-inicio"
+                    className="text-sm font-medium text-gray-300"
+                  >
+                    Desde
+                  </label>
+                  <input
+                    id="portfolio-fecha-inicio"
+                    type="date"
+                    min="2010-01-01"
+                    value={portfolioFechaInicio}
+                    onChange={(e) => setPortfolioFechaInicio(e.target.value)}
+                    className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                  />
+                </div>
+                <div className="flex min-w-[160px] flex-col gap-2">
+                  <label
+                    htmlFor="portfolio-fecha-fin"
+                    className="text-sm font-medium text-gray-300"
+                  >
+                    Hasta
+                  </label>
+                  <input
+                    id="portfolio-fecha-fin"
+                    type="date"
+                    value={portfolioFechaFin}
+                    onChange={(e) => setPortfolioFechaFin(e.target.value)}
+                    className="w-full rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
+                  />
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleCalcularPortafolio}
+                    disabled={portfolioCargando}
+                    className="rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Calcular
+                  </button>
+                  {portfolioCargando && (
+                    <span className="text-sm text-gray-400">Calculando...</span>
+                  )}
+                </div>
+              </div>
+              {portfolioError && (
+                <p className="mt-4 text-sm text-red-400">{portfolioError}</p>
+              )}
+            </section>
+
+            <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <MetricCard
+                label="Posición Neta (MWh)"
+                value={
+                  portfolioResumen
+                    ? `${formatMiles(portfolioResumen.posicion_neta_total_kwh / 1000)}`
+                    : '—'
+                }
+                accent={
+                  portfolioResumen && portfolioResumen.posicion_neta_total_kwh <= 0
+                    ? 'text-emerald-400'
+                    : 'text-red-400'
+                }
+              />
+              <MetricCard
+                label="Costo/Ingreso Bolsa (M COP)"
+                value={
+                  portfolioResumen
+                    ? `${formatMiles(portfolioResumen.costo_bolsa_total_cop / 1_000_000)}`
+                    : '—'
+                }
+                accent={
+                  portfolioResumen && portfolioResumen.costo_bolsa_total_cop <= 0
+                    ? 'text-emerald-400'
+                    : 'text-red-400'
+                }
+              />
+              <MetricCard
+                label="Hora Pico Compra"
+                value={
+                  portfolioResumen?.hora_pico_compra
+                    ? `H${portfolioResumen.hora_pico_compra}`
+                    : '—'
+                }
+                accent="text-sky-400"
+              />
+              <MetricCard
+                label="Hora Pico Venta"
+                value={
+                  portfolioResumen?.hora_pico_venta
+                    ? `H${portfolioResumen.hora_pico_venta}`
+                    : '—'
+                }
+                accent="text-rose-400"
+              />
+            </section>
+
+            <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
+              <h2 className="mb-6 text-lg font-semibold text-gray-200">
+                Posición horaria del portafolio
+              </h2>
+              <div className="h-80 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart
+                    data={portfolioPorHora}
+                    margin={{ top: 8, right: 48, left: 0, bottom: 8 }}
+                  >
+                    <CartesianGrid stroke="#374151" strokeDasharray="3 3" />
+                    <XAxis
+                      dataKey="hora"
+                      stroke="#9ca3af"
+                      tick={{ fill: '#9ca3af', fontSize: 12 }}
+                    />
+                    <YAxis
+                      yAxisId="left"
+                      stroke="#9ca3af"
+                      tick={{ fill: '#9ca3af', fontSize: 12 }}
+                    />
+                    <YAxis
+                      yAxisId="right"
+                      orientation="right"
+                      stroke="#eab308"
+                      tick={{ fill: '#eab308', fontSize: 12 }}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: '#111827',
+                        border: '1px solid #374151',
+                        borderRadius: '8px',
+                        color: '#f3f4f6',
+                      }}
+                      labelFormatter={(hora) => `Hora: ${hora}`}
+                      formatter={(value, name) => [
+                        `${formatMiles(Number(value))} MWh`,
+                        name,
+                      ]}
+                    />
+                    <Legend wrapperStyle={{ color: '#9ca3af', paddingTop: 12 }} />
+                    <Bar
+                      yAxisId="left"
+                      dataKey="compra_r"
+                      stackId="compras"
+                      name="Compra R"
+                      fill="#3b82f6"
+                    />
+                    <Bar
+                      yAxisId="left"
+                      dataKey="compra_nr"
+                      stackId="compras"
+                      name="Compra NR"
+                      fill="#22c55e"
+                    />
+                    <Bar yAxisId="left" dataKey="venta" name="Venta" fill="#ef4444" />
+                    <Line
+                      yAxisId="right"
+                      type="monotone"
+                      dataKey="posicion_neta"
+                      name="Posición Neta"
+                      stroke="#eab308"
+                      strokeWidth={2}
+                      dot={false}
+                    />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </section>
+
+            <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
+              <h2 className="mb-6 text-lg font-semibold text-gray-200">
+                Perfil horario de compras por tipo de día
+              </h2>
+              <div className="h-80 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart
+                    data={perfilHorarioPorTipoDia}
+                    margin={{ top: 8, right: 16, left: 0, bottom: 8 }}
+                  >
+                    <CartesianGrid stroke="#374151" strokeDasharray="3 3" />
+                    <XAxis
+                      dataKey="hora"
+                      type="number"
+                      domain={[1, 24]}
+                      ticks={Array.from({ length: 24 }, (_, i) => i + 1)}
+                      stroke="#9ca3af"
+                      tick={{ fill: '#9ca3af', fontSize: 12 }}
+                    />
+                    <YAxis stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 12 }} />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: '#111827',
+                        border: '1px solid #374151',
+                        borderRadius: '8px',
+                        color: '#f3f4f6',
+                      }}
+                      labelFormatter={(hora) => `Hora: ${hora}`}
+                      formatter={(value, name) => [
+                        `${formatMiles(Number(value))} MWh`,
+                        name,
+                      ]}
+                    />
+                    <Legend wrapperStyle={{ color: '#9ca3af', paddingTop: 12 }} />
+                    <Line
+                      type="monotone"
+                      dataKey="ordinario_compra"
+                      name="Ordinario"
+                      stroke="#60a5fa"
+                      strokeWidth={2}
+                      dot={false}
+                      connectNulls
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="sabado_compra"
+                      name="Sábado"
+                      stroke="#22c55e"
+                      strokeWidth={2}
+                      dot={false}
+                      connectNulls
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="domfest_compra"
+                      name="Domingo/Festivo"
+                      stroke="#eab308"
+                      strokeWidth={2}
+                      dot={false}
+                      connectNulls
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </section>
+
+            <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
+              <h2 className="mb-1 text-lg font-semibold text-gray-200">
+                Perfil horario de ventas por tipo de día
+              </h2>
+              <p className="mb-5 text-xs text-gray-500">
+                Contratos de venta a otros agentes — <code className="text-gray-400">venta_kwh</code> (inventario Olibia)
+              </p>
+              <div className="h-80 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart
+                    data={perfilHorarioPorTipoDia}
+                    margin={{ top: 8, right: 16, left: 0, bottom: 8 }}
+                  >
+                    <CartesianGrid stroke="#374151" strokeDasharray="3 3" />
+                    <XAxis
+                      dataKey="hora"
+                      type="number"
+                      domain={[1, 24]}
+                      ticks={Array.from({ length: 24 }, (_, i) => i + 1)}
+                      stroke="#9ca3af"
+                      tick={{ fill: '#9ca3af', fontSize: 12 }}
+                    />
+                    <YAxis stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 12 }} />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: '#111827',
+                        border: '1px solid #374151',
+                        borderRadius: '8px',
+                        color: '#f3f4f6',
+                      }}
+                      labelFormatter={(hora) => `Hora: ${hora}`}
+                      formatter={(value, name) => [
+                        `${formatMiles(Number(value))} MWh`,
+                        name,
+                      ]}
+                    />
+                    <Legend wrapperStyle={{ color: '#9ca3af', paddingTop: 12 }} />
+                    <Line
+                      type="monotone"
+                      dataKey="ordinario_venta"
+                      name="Ordinario"
+                      stroke="#60a5fa"
+                      strokeWidth={2}
+                      dot={false}
+                      connectNulls
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="sabado_venta"
+                      name="Sábado"
+                      stroke="#22c55e"
+                      strokeWidth={2}
+                      dot={false}
+                      connectNulls
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="domfest_venta"
+                      name="Domingo/Festivo"
+                      stroke="#eab308"
+                      strokeWidth={2}
+                      dot={false}
+                      connectNulls
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </section>
+
+            <section className="overflow-hidden rounded-xl border border-gray-800">
+              <div className="border-b border-gray-800 bg-gray-900/80 px-6 py-4">
+                <h2 className="text-lg font-semibold text-gray-200">
+                  Resumen diario del portafolio
+                </h2>
+              </div>
+              {portfolioResumenDiario.length > 0 && (
+                <div className="flex flex-wrap items-end gap-3 border-b border-gray-800 bg-gray-950/60 px-6 py-3">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-medium uppercase tracking-wider text-gray-500">
+                      Mes
+                    </label>
+                    <select
+                      value={portfolioFiltroMes}
+                      onChange={(e) => setPortfolioFiltroMes(e.target.value)}
+                      className={CLASE_SELECT}
+                    >
+                      {portfolioMesesDisponibles.map((m) => (
+                        <option key={m} value={m}>
+                          {formatMes(m)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-medium uppercase tracking-wider text-gray-500">
+                      Tipo de día
+                    </label>
+                    <select
+                      value={portfolioFiltroTipoDia}
+                      onChange={(e) => setPortfolioFiltroTipoDia(e.target.value)}
+                      className={CLASE_SELECT}
+                    >
+                      <option value="todos">Todos</option>
+                      <option value="Ordinario">Ordinario</option>
+                      <option value="Sábado">Sábado</option>
+                      <option value="Domingo">Domingo</option>
+                      <option value="Festivo">Festivo</option>
+                    </select>
+                  </div>
+                </div>
+              )}
+              <div className="bg-gray-900/40 px-6 py-5">
+                {portfolioResumenDiario.length === 0 ? (
+                  <MensajeSinDatos>
+                    No hay datos disponibles para el rango seleccionado.
+                  </MensajeSinDatos>
+                ) : portfolioResumenDiarioFiltrado.length === 0 ? (
+                  <MensajeSinDatos>
+                    No hay días que coincidan con los filtros seleccionados.
+                  </MensajeSinDatos>
+                ) : (
+                  <TablaAnalisis
+                    encabezados={[
+                      'Fecha',
+                      'Tipo Día',
+                      'Compra R (MWh)',
+                      'Compra NR (MWh)',
+                      'Venta (MWh)',
+                      'Posición Neta (MWh)',
+                      'Costo Bolsa (M COP)',
+                    ]}
+                    filas={
+                      <>
+                        {portfolioResumenDiarioFiltrado.map((fila) => (
+                          <tr
+                            key={fila.fecha}
+                            className="transition-colors hover:bg-gray-800/40"
+                          >
+                            <td className="px-4 py-2.5 text-gray-300">
+                              {formatFechaLegible(fila.fecha)}
+                            </td>
+                            <td className="px-4 py-2.5 text-right text-gray-300">
+                              {fila.tipoDia}
+                            </td>
+                            <td className="px-4 py-2.5 text-right tabular-nums text-sky-300">
+                              {formatMiles(fila.compraR)}
+                            </td>
+                            <td className="px-4 py-2.5 text-right tabular-nums text-emerald-300">
+                              {formatMiles(fila.compraNr)}
+                            </td>
+                            <td className="px-4 py-2.5 text-right tabular-nums text-rose-300">
+                              {formatMiles(fila.venta)}
+                            </td>
+                            <td
+                              className={`px-4 py-2.5 text-right font-medium tabular-nums ${
+                                fila.posicionNeta <= 0 ? 'text-emerald-400' : 'text-red-400'
+                              }`}
+                            >
+                              {formatMiles(fila.posicionNeta)}
+                            </td>
+                            <td className="px-4 py-2.5 text-right tabular-nums text-gray-200">
+                              {formatMiles(fila.costoBolsa)}
+                            </td>
+                          </tr>
+                        ))}
+                        {portfolioTotalesFiltrados && (
+                          <tr className="border-t-2 border-gray-700 bg-gray-800/60">
+                            <td className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-gray-400">
+                              TOTAL MES
+                            </td>
+                            <td className="px-4 py-2.5" />
+                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-sky-300">
+                              {formatMiles(portfolioTotalesFiltrados.compraR)}
+                            </td>
+                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-emerald-300">
+                              {formatMiles(portfolioTotalesFiltrados.compraNr)}
+                            </td>
+                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-rose-300">
+                              {formatMiles(portfolioTotalesFiltrados.venta)}
+                            </td>
+                            <td
+                              className={`px-4 py-2.5 text-right font-semibold tabular-nums ${
+                                portfolioTotalesFiltrados.posicionNeta <= 0
+                                  ? 'text-emerald-400'
+                                  : 'text-red-400'
+                              }`}
+                            >
+                              {formatMiles(portfolioTotalesFiltrados.posicionNeta)}
+                            </td>
+                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-gray-200">
+                              {formatMiles(portfolioTotalesFiltrados.costoBolsa)}
+                            </td>
+                          </tr>
+                        )}
+                      </>
+                    }
+                  />
+                )}
+              </div>
+            </section>
+          </>
+        )}
       </main>
     </div>
   )

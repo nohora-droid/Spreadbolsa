@@ -11,12 +11,14 @@ from __future__ import annotations
 
 
 from datetime import date, datetime
+from pathlib import Path
 
 
 
 from fastapi import FastAPI, HTTPException, Query
 
 from fastapi.middleware.cors import CORSMiddleware
+import pandas as pd
 
 
 
@@ -25,6 +27,12 @@ from dotenv import load_dotenv
 
 
 from spread_engine import calcular_spread, cargar_pb_sql
+from portfolio_engine import (
+    cargar_inventario,
+    calcular_posicion_neta,
+    calcular_costo_bolsa,
+    resumen_portafolio,
+)
 
 
 
@@ -291,5 +299,121 @@ def spread(
             detail=f"No se pudieron obtener los datos de precio de bolsa: {error}",
 
         ) from error
+
+
+@app.get("/portfolio")
+def portfolio(
+    fecha_inicio: str = Query(
+        default_factory=_fecha_inicio_por_defecto,
+        description="Fecha mínima inclusive (YYYY-MM-DD). Por defecto: primer día del mes actual.",
+    ),
+    fecha_fin: str = Query(
+        default_factory=_fecha_fin_por_defecto,
+        description="Fecha máxima inclusive (YYYY-MM-DD). Por defecto: hoy.",
+    ),
+):
+    """
+    Calcula portafolio horario combinando inventario de contratos y precio de bolsa.
+    """
+    # Validar formato y coherencia de fechas antes de cualquier proceso.
+    _validar_fecha_iso(fecha_inicio, "fecha_inicio")
+    _validar_fecha_iso(fecha_fin, "fecha_fin")
+    if fecha_inicio > fecha_fin:
+        raise HTTPException(
+            status_code=400,
+            detail="fecha_inicio no puede ser posterior a fecha_fin.",
+        )
+
+    # a) Cargar inventario desde la carpeta raíz del proyecto (un nivel arriba de backend/).
+    ruta_raiz_proyecto = Path(__file__).parent.parent
+    try:
+        inventario = cargar_inventario(ruta_raiz_proyecto)
+    except Exception as error:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No fue posible cargar inventario: {error}",
+        ) from error
+
+    # b) Cargar PB desde Metabase usando SQL nativo.
+    try:
+        df_pb = cargar_pb_sql(
+            database_id=METABASE_DATABASE_PB,
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+        )
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Error consultando Metabase para PB: {error}",
+        ) from error
+
+    # 404 si no existen datos de PB en el rango consultado.
+    if df_pb.empty:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay datos de PB para el rango de fechas indicado.",
+        )
+
+    # c) Calcular resultados por cada fecha única de PB.
+    resultados_por_dia = []
+    fechas_unicas = sorted(df_pb["fecha"].dropna().unique().tolist())
+
+    for fecha in fechas_unicas:
+        # Posición neta horaria según inventario y tipo de día.
+        df_posicion = calcular_posicion_neta(inventario, fecha)
+
+        # Subconjunto PB del día para cruzar por hora.
+        df_pb_dia = df_pb.loc[df_pb["fecha"] == fecha].copy()
+
+        # Costo de bolsa por hora (posición neta * precio bolsa).
+        df_costo_dia = calcular_costo_bolsa(df_posicion, df_pb_dia)
+        df_costo_dia["fecha"] = fecha
+        resultados_por_dia.append(df_costo_dia)
+
+    # d) Concatenar resultados diarios en una sola tabla.
+    if not resultados_por_dia:
+        raise HTTPException(
+            status_code=404,
+            detail="No se pudieron construir resultados de portafolio para el rango indicado.",
+        )
+    df_portafolio = pd.concat(resultados_por_dia, ignore_index=True).sort_values(
+        ["fecha", "hora"]
+    ).reset_index(drop=True)
+
+    # e) Calcular resumen agregado del portafolio.
+    resumen = resumen_portafolio(df_portafolio, f"{fecha_inicio} a {fecha_fin}")
+
+    # Construir salida con columnas solicitadas en formato serializable JSON.
+    columnas_respuesta = [
+        "fecha",
+        "hora",
+        "compra_r_kwh",
+        "compra_nr_kwh",
+        "venta_kwh",
+        "posicion_neta_kwh",
+        "precio_bolsa",
+        "costo_bolsa_cop",
+    ]
+    df_respuesta = df_portafolio[columnas_respuesta]
+
+    datos = [
+        {
+            "fecha": str(fila["fecha"]),
+            "hora": int(fila["hora"]),
+            "compra_r_kwh": float(fila["compra_r_kwh"]),
+            "compra_nr_kwh": float(fila["compra_nr_kwh"]),
+            "venta_kwh": float(fila["venta_kwh"]),
+            "posicion_neta_kwh": float(fila["posicion_neta_kwh"]),
+            "precio_bolsa": float(fila["precio_bolsa"]),
+            "costo_bolsa_cop": float(fila["costo_bolsa_cop"]),
+        }
+        for fila in df_respuesta.to_dict(orient="records")
+    ]
+
+    return {
+        "resumen": resumen,
+        "datos": datos,
+        "total_filas": len(df_respuesta),
+    }
 
 
