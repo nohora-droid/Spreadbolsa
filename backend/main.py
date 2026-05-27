@@ -419,6 +419,20 @@ def portfolio(
 # Simulador de nuevos contratos
 # ─────────────────────────────────────────────────────────────────────────────
 
+_PERFILES_VALIDOS = frozenset({
+    "plano", "bloques", "solar", "excel",
+    # aliases legacy por compatibilidad
+    "custom", "excel_custom",
+    "ordinario", "sabado", "festivo",
+})
+
+
+class BloqueHorario(BaseModel):
+    hora_ini: int = Field(..., ge=1, le=24, description="Hora de inicio (1-24)")
+    hora_fin: int = Field(..., ge=1, le=24, description="Hora de fin inclusiva (1-24)")
+    mwh_mes: float = Field(..., gt=0, description="Energía del bloque en MWh/mes")
+
+
 class ContratoSimulacion(BaseModel):
     tipo: str = Field("compra", description="'compra' o 'venta'")
     contraparte: str = Field("", description="Nombre libre de la contraparte")
@@ -426,12 +440,17 @@ class ContratoSimulacion(BaseModel):
     fecha_inicio: str = Field(..., description="Inicio de vigencia YYYY-MM-DD")
     fecha_fin: str = Field(..., description="Fin de vigencia YYYY-MM-DD")
     tipo_mercado: str = Field("regulado", description="'regulado', 'no_regulado' o 'ambos'")
-    perfil_horario: str = Field("plano", description="'plano'|'custom'|'excel_custom'|'ordinario'|'sabado'|'festivo'")
-    # Energía total en MWh/mes (requerida para plano, solar, bloques)
+    perfil_horario: str = Field(
+        "plano",
+        description="'plano' | 'bloques' | 'solar' | 'excel'",
+    )
+    # Energía total en MWh/mes (requerida para plano y solar)
     energia_mensual_mwh: Optional[float] = Field(None, gt=0, description="Energía en MWh/mes")
-    # Para perfil solar/bloques: 24 pesos relativos (se normalizan a suma=1)
+    # Para perfil 'bloques': lista de bloques horarios
+    bloques: Optional[List[BloqueHorario]] = Field(None, description="Bloques horarios para perfil 'bloques'")
+    # Para perfil 'custom' (legacy): 24 pesos relativos
     perfil_pesos_24h: Optional[List[float]] = Field(None, description="24 pesos horarios normalizados")
-    # Para perfil Excel: 12 × 24 valores absolutos de kWh/mes por hora
+    # Para perfil 'excel' / 'excel_custom' (legacy): 12 × 24 valores absolutos de kWh/mes por hora
     perfil_excel_12x24: Optional[List[List[float]]] = Field(None, description="Matriz 12×24 kWh/mes por hora")
 
 
@@ -461,10 +480,13 @@ def simulate(contrato: ContratoSimulacion):
             status_code=400,
             detail="tipo_mercado debe ser 'regulado', 'no_regulado' o 'ambos'.",
         )
-    if contrato.perfil_horario not in ("plano", "ordinario", "sabado", "festivo"):
+    if contrato.perfil_horario not in _PERFILES_VALIDOS:
         raise HTTPException(
             status_code=400,
-            detail="perfil_horario debe ser 'plano', 'ordinario', 'sabado' o 'festivo'.",
+            detail=(
+                f"perfil_horario '{contrato.perfil_horario}' no reconocido. "
+                "Valores aceptados: 'plano', 'bloques', 'solar', 'excel'."
+            ),
         )
 
     # Cargar inventario
@@ -498,6 +520,12 @@ def simulate(contrato: ContratoSimulacion):
 
     # Ejecutar simulación
     try:
+        # Convertir bloques Pydantic → dicts simples para el engine
+        bloques_dict = (
+            [b.model_dump() for b in contrato.bloques]
+            if contrato.bloques
+            else None
+        )
         resultado = simular_contrato(
             inventario=inventario,
             df_pb=df_pb,
@@ -508,6 +536,7 @@ def simulate(contrato: ContratoSimulacion):
             tipo_mercado=contrato.tipo_mercado,
             perfil_horario=contrato.perfil_horario,
             energia_mensual_mwh=contrato.energia_mensual_mwh,
+            bloques=bloques_dict,
             perfil_pesos_24h=contrato.perfil_pesos_24h,
             perfil_excel_12x24=contrato.perfil_excel_12x24,
         )

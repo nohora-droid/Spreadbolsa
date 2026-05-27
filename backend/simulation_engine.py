@@ -28,6 +28,15 @@ _PERFIL_A_CLAVE: dict[str, str] = {
     "festivo":   "compra_fe",
 }
 
+# Curva solar típica para Colombia (ecuatorial) — suma = 1.0
+# H1-H6 y H19-H24 = 0; campana gaussiana entre H7 y H18
+SOLAR_PESOS_24H: list[float] = [
+    0,    0,    0,    0,    0,    0,      # H1-H6
+    0.02, 0.06, 0.11, 0.15, 0.15, 0.14,  # H7-H12
+    0.12, 0.10, 0.08, 0.05, 0.02, 0,     # H13-H18
+    0,    0,    0,    0,    0,    0,      # H19-H24
+]
+
 
 def _dias_en_mes(anio: int, mes: int) -> int:
     return calendar.monthrange(anio, mes)[1]
@@ -38,28 +47,31 @@ def _distribuir_energia_horaria(
     fecha_str: str,
     perfil: str,
     inventario: dict[str, pd.DataFrame],
+    bloques: list[dict] | None = None,
     perfil_pesos_24h: list[float] | None = None,
     perfil_excel_12x24: list[list[float]] | None = None,
 ) -> pd.Series:
     """
-    Devuelve una Serie indexada 1..24 con kWh que corresponden a ese día.
+    Devuelve una Serie indexada 1..24 con kWh por hora para ese día.
 
     Prioridad de resolución:
-      1. perfil_excel_12x24  → usa la fila del mes directamente (kWh/mes ÷ días)
-      2. perfil_pesos_24h    → normaliza pesos y escala a energia_mensual_kwh/mes ÷ días
-      3. perfil == 'plano'   → distribución uniforme
-      4. perfil en inventario→ forma del inventario Olibia (ordinario/sabado/festivo)
-      5. fallback            → plano
+      1. perfil == 'excel' / 'excel_custom'  → usa perfil_excel_12x24 (kWh/mes ÷ días)
+      2. perfil == 'bloques'                 → construye pesos desde lista de bloques
+      3. perfil == 'solar'                   → usa curva solar colombiana (SOLAR_PESOS_24H)
+      4. perfil_pesos_24h provisto ('custom')→ normaliza y escala
+      5. perfil == 'plano'                   → distribución uniforme
+      6. perfil en inventario Olibia         → forma del inventario (ordinario/sabado/festivo)
+      7. fallback                            → plano
     """
     fecha_obj = datetime.strptime(fecha_str, "%Y-%m-%d")
     dias = _dias_en_mes(fecha_obj.year, fecha_obj.month)
+    kwh = energia_mensual_kwh or 0.0
 
     # ── 1. Excel personalizado (12 × 24 kWh/mes por hora) ────────────────────
-    if perfil_excel_12x24 is not None:
+    if perfil in ("excel", "excel_custom") and perfil_excel_12x24 is not None:
         mes_idx = fecha_obj.month - 1        # 0-11
         if mes_idx < len(perfil_excel_12x24):
             fila = list(perfil_excel_12x24[mes_idx])
-            # Garantizar 24 valores
             while len(fila) < 24:
                 fila.append(0.0)
             return pd.Series(
@@ -67,33 +79,58 @@ def _distribuir_energia_horaria(
                 index=range(1, 25),
                 dtype="float64",
             )
-        # Fallback al plano con energía provista
-        kwh = (energia_mensual_kwh or 0.0)
+        # mes fuera del rango de la matriz → plano con energía provista
         return pd.Series([kwh / dias / 24.0] * 24, index=range(1, 25), dtype="float64")
 
-    # ── 2. Pesos personalizados (solar, bloques, etc.) ────────────────────────
-    if perfil_pesos_24h is not None and energia_mensual_kwh and energia_mensual_kwh > 0:
+    # ── 2. Bloques horarios definidos por el usuario ──────────────────────────
+    if perfil == "bloques" and bloques:
+        pesos = [0.0] * 24
+        total_kwh = 0.0
+        for b in bloques:
+            h_ini = int(b.get("hora_ini", 1))
+            h_fin = int(b.get("hora_fin", 24))
+            mwh = float(b.get("mwh_mes", 0))
+            kwh_bloque = mwh * 1_000.0
+            n_horas = max(1, h_fin - h_ini + 1)
+            kwh_por_hora = kwh_bloque / n_horas
+            for h in range(max(1, h_ini), min(24, h_fin) + 1):
+                pesos[h - 1] += kwh_por_hora / dias
+            total_kwh += kwh_bloque
+        if total_kwh <= 0:
+            return pd.Series([0.0] * 24, index=range(1, 25), dtype="float64")
+        return pd.Series(pesos, index=range(1, 25), dtype="float64")
+
+    # ── 3. Curva solar colombiana ─────────────────────────────────────────────
+    if perfil == "solar":
+        energia_diaria = kwh / dias if kwh > 0 else 0.0
+        total_pesos = sum(SOLAR_PESOS_24H)
+        valores = [
+            (p / total_pesos) * energia_diaria if total_pesos > 0 else 0.0
+            for p in SOLAR_PESOS_24H
+        ]
+        return pd.Series(valores, index=range(1, 25), dtype="float64")
+
+    # ── 4. Pesos personalizados explícitos (alias 'custom') ───────────────────
+    if perfil_pesos_24h is not None and kwh > 0:
         pesos = list(perfil_pesos_24h)
         while len(pesos) < 24:
             pesos.append(0.0)
         pesos = pesos[:24]
         total = sum(pesos)
-        energia_diaria = energia_mensual_kwh / dias
+        energia_diaria = kwh / dias
         if total > 0:
             return pd.Series(
                 [(p / total) * energia_diaria for p in pesos],
                 index=range(1, 25),
                 dtype="float64",
             )
-        # Fallback plano si todos los pesos son 0
         return pd.Series([energia_diaria / 24.0] * 24, index=range(1, 25), dtype="float64")
 
-    # ── 3. Perfil plano ───────────────────────────────────────────────────────
-    kwh = energia_mensual_kwh or 0.0
+    # ── 5. Perfil plano ───────────────────────────────────────────────────────
     if perfil == "plano":
         return pd.Series([kwh / dias / 24.0] * 24, index=range(1, 25), dtype="float64")
 
-    # ── 4. Perfil con forma del inventario Olibia ─────────────────────────────
+    # ── 6. Perfil con forma del inventario Olibia ─────────────────────────────
     clave = _PERFIL_A_CLAVE.get(perfil)
     if clave and clave in inventario and kwh > 0:
         periodo = _periodo_desde_fecha(fecha_obj)
@@ -108,7 +145,7 @@ def _distribuir_energia_horaria(
             except ValueError:
                 pass
 
-    # ── 5. Fallback plano ─────────────────────────────────────────────────────
+    # ── 7. Fallback plano ─────────────────────────────────────────────────────
     return pd.Series([kwh / dias / 24.0] * 24, index=range(1, 25), dtype="float64")
 
 
@@ -122,6 +159,7 @@ def simular_contrato(
     tipo_mercado: str,
     perfil_horario: str,
     energia_mensual_mwh: float | None = None,
+    bloques: list[dict] | None = None,
     perfil_pesos_24h: list[float] | None = None,
     perfil_excel_12x24: list[list[float]] | None = None,
 ) -> dict[str, Any]:
@@ -165,6 +203,7 @@ def simular_contrato(
             fecha,
             perfil_horario,
             inventario,
+            bloques=bloques,
             perfil_pesos_24h=perfil_pesos_24h,
             perfil_excel_12x24=perfil_excel_12x24,
         )

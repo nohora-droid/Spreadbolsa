@@ -436,7 +436,7 @@ function App() {
   const [tabActiva, setTabActiva] = useState<DashboardTab>('spread')
   const [posicion, setPosicion] = useState<'vendedor' | 'comprador'>('vendedor')
   const [precioContrato, setPrecioContrato] = useState(350)
-  const [fechaInicio, setFechaInicio] = useState('2026-01-01')
+  const [fechaInicio, setFechaInicio] = useState('2010-01-01')
   const [fechaFin, setFechaFin] = useState(
     () => new Date().toISOString().split('T')[0],
   )
@@ -459,6 +459,8 @@ function App() {
   const [portfolioDatos, setPortfolioDatos] = useState<FilaPortfolio[]>([])
   const [portfolioFiltroMes, setPortfolioFiltroMes] = useState('')
   const [portfolioFiltroTipoDia, setPortfolioFiltroTipoDia] = useState('todos')
+  // Controla que el portafolio se cargue automáticamente sólo la primera vez
+  const portfolioCargadoRef = useRef(false)
 
   // ── Simulador ──────────────────────────────────────────────────────────────
   const [simFuentePB, setSimFuentePB] = useState<SimFuentePB>('historico')
@@ -634,7 +636,7 @@ function App() {
 
   useEffect(() => {
     const controller = new AbortController()
-    cargarSpread(350, '2026-01-01', new Date().toISOString().split('T')[0], {
+    cargarSpread(350, '2010-01-01', new Date().toISOString().split('T')[0], {
       inicial: true,
       signal: controller.signal,
     })
@@ -648,6 +650,16 @@ function App() {
   function handleCalcularPortafolio() {
     cargarPortafolio(portfolioFechaInicio, portfolioFechaFin)
   }
+
+  // Carga automática del portafolio la primera vez que se abre esa tab
+  useEffect(() => {
+    if (tabActiva !== 'portafolio') return
+    if (portfolioCargadoRef.current) return
+    portfolioCargadoRef.current = true
+    const controller = new AbortController()
+    cargarPortafolio(portfolioFechaInicio, portfolioFechaFin, controller.signal)
+    return () => controller.abort()
+  }, [tabActiva])
 
   // Auto-fill dates when ENSO option changes
   useEffect(() => {
@@ -739,47 +751,41 @@ function App() {
       setSimError(null)
 
       // ── Build profile fields for the API ───────────────────────────────────
-      let perfil_horario = 'plano'
-      let energia_mensual_mwh: number | undefined = undefined
-      let perfil_pesos_24h: number[] | undefined = undefined
-      let perfil_excel_12x24: number[][] | undefined = undefined
-
-      if (simPerfilTipo === 'plano') {
-        perfil_horario = 'plano'
-        energia_mensual_mwh = simEnergiaMwh
-      } else if (simPerfilTipo === 'solar') {
-        perfil_horario = 'custom'
-        energia_mensual_mwh = simEnergiaMwh
-        perfil_pesos_24h = SOLAR_PESOS_24H
-      } else if (simPerfilTipo === 'bloques') {
-        perfil_horario = 'custom'
-        // Build 24 weights from block definitions
-        const pesos = new Array<number>(24).fill(0)
-        for (const b of simBloques) {
-          const horas = Math.max(1, b.horaFin - b.horaInicio + 1)
-          const mwhPorHora = b.mwhMes / horas
-          for (let h = b.horaInicio; h <= Math.min(b.horaFin, 24); h++) {
-            pesos[h - 1] += mwhPorHora
-          }
-        }
-        perfil_pesos_24h = pesos
-        energia_mensual_mwh = pesos.reduce((s, v) => s + v, 0)
-      } else if (simPerfilTipo === 'excel' && simExcel12x24) {
-        perfil_horario = 'excel_custom'
-        perfil_excel_12x24 = simExcel12x24
+      // The backend handles all profile logic; the frontend just ships the
+      // raw inputs (bloques list, excel matrix, energy amount).
+      type SimBody = {
+        tipo: string
+        contraparte: string
+        precio_cop_kwh: number
+        fecha_inicio: string
+        fecha_fin: string
+        tipo_mercado: string
+        perfil_horario: string
+        energia_mensual_mwh?: number
+        bloques?: { hora_ini: number; hora_fin: number; mwh_mes: number }[]
+        perfil_excel_12x24?: number[][]
       }
 
-      const body: Record<string, unknown> = {
+      const body: SimBody = {
         tipo: simTipo,
         contraparte: simContraparte,
         precio_cop_kwh: simPrecio,
         fecha_inicio: simFechaInicio,
         fecha_fin: simFechaFin,
         tipo_mercado: simTipoMercado,
-        perfil_horario,
-        ...(energia_mensual_mwh != null ? { energia_mensual_mwh } : {}),
-        ...(perfil_pesos_24h != null ? { perfil_pesos_24h } : {}),
-        ...(perfil_excel_12x24 != null ? { perfil_excel_12x24 } : {}),
+        perfil_horario: simPerfilTipo === 'excel' ? 'excel' : simPerfilTipo,
+      }
+
+      if (simPerfilTipo === 'plano' || simPerfilTipo === 'solar') {
+        body.energia_mensual_mwh = simEnergiaMwh
+      } else if (simPerfilTipo === 'bloques') {
+        body.bloques = simBloques.map((b) => ({
+          hora_ini: b.horaInicio,
+          hora_fin: b.horaFin,
+          mwh_mes: b.mwhMes,
+        }))
+      } else if (simPerfilTipo === 'excel' && simExcel12x24) {
+        body.perfil_excel_12x24 = simExcel12x24
       }
 
       const respuesta = await fetch(API_SIMULATE, {
