@@ -127,17 +127,22 @@ interface FilaPortfolio {
   costo_bolsa: number
 }
 
-/** Respuesta del endpoint /portfolio/posicion — un objeto por mes, sin PB. */
+/** Un elemento de resumen_mensual devuelto por /portfolio/posicion. */
 interface FilaPosicionMensual {
-  mes: string                          // "YYYY-MM"
+  mes: string          // "YYYY-MM"
   compra_r_mwh: number
   compra_nr_mwh: number
   venta_mwh: number
   posicion_neta_mwh: number
-  cop_compra_r_mcop: number
-  cop_compra_nr_mcop: number
-  cop_venta_mcop: number
-  tipo_posicion: 'vendedor' | 'comprador'
+  dias: number         // días reales del mes procesados
+}
+
+/** Distribución de tipos de día devuelta por /portfolio/posicion. */
+interface DistribucionTipoDia {
+  ordinarios: number
+  sabados: number
+  domingos: number
+  festivos: number
 }
 
 interface PortfolioResumen {
@@ -481,6 +486,8 @@ function App() {
   const [wizPeriodoInicio, setWizPeriodoInicio] = useState('2026-01-01')
   const [wizPeriodoFin, setWizPeriodoFin]       = useState('2026-12-31')
   const [wizPosicionMensual,   setWizPosicionMensual]   = useState<FilaPosicionMensual[]>([])
+  const [wizTotalDias,         setWizTotalDias]         = useState<number>(0)
+  const [wizDistTipoDia,       setWizDistTipoDia]       = useState<DistribucionTipoDia | null>(null)
   const [wizPortfolioCargando, setWizPortfolioCargando] = useState(false)
   const [wizPortfolioError,    setWizPortfolioError]    = useState<string | null>(null)
 
@@ -701,8 +708,14 @@ function App() {
       const resp = await fetch(`${API_POSICION}?fecha_inicio=${wizPeriodoInicio}&fecha_fin=${wizPeriodoFin}`)
       if (!resp.ok) { const c = await resp.json().catch(() => null); throw new Error(c?.detail ?? `Error ${resp.status}`) }
       const json = await resp.json()
-      setWizPosicionMensual(Array.isArray(json?.meses) ? json.meses : [])
-    } catch (err) { setWizPortfolioError(err instanceof Error ? err.message : 'Error'); setWizPosicionMensual([]) }
+      // resumen_mensual: [{mes, compra_r_mwh, compra_nr_mwh, venta_mwh, posicion_neta_mwh, dias}]
+      setWizPosicionMensual(Array.isArray(json?.resumen_mensual) ? json.resumen_mensual : [])
+      setWizTotalDias(typeof json?.total_dias === 'number' ? json.total_dias : 0)
+      setWizDistTipoDia(json?.distribucion_tipo_dia ?? null)
+    } catch (err) {
+      setWizPortfolioError(err instanceof Error ? err.message : 'Error')
+      setWizPosicionMensual([]); setWizTotalDias(0); setWizDistTipoDia(null)
+    }
     finally { setWizPortfolioCargando(false) }
   }
 
@@ -739,7 +752,7 @@ function App() {
     finally { setWizSimCargando(false) }
   }
 
-  function wizReset() { setWizPaso(1); setWizPosicionMensual([]); setWizPortfolioError(null); setWizPBDatos([]); setWizPBError(null); setWizResultado(null); setWizSimError(null); setWizSimExcel12x24(null); setWizSimExcelNombre('') }
+  function wizReset() { setWizPaso(1); setWizPosicionMensual([]); setWizTotalDias(0); setWizDistTipoDia(null); setWizPortfolioError(null); setWizPBDatos([]); setWizPBError(null); setWizResultado(null); setWizSimError(null); setWizSimExcel12x24(null); setWizSimExcelNombre('') }
 
   function wizDescargarJSON() {
     if (!wizResultado) return
@@ -782,16 +795,19 @@ function App() {
   }
 
   const wizResumenMensual = useMemo(() => {
+    // El backend devuelve energía pura (kWh→MWh).
+    // Los precios COP son mock y se aplican aquí en el frontend.
     return wizPosicionMensual.map(m => ({
       mes:         m.mes,
       compraRmwh:  m.compra_r_mwh,
       compraNrmwh: m.compra_nr_mwh,
       ventaMwh:    m.venta_mwh,
       posNetaMwh:  m.posicion_neta_mwh,
-      copCompraR:  m.cop_compra_r_mcop,
-      copCompraNr: m.cop_compra_nr_mcop,
-      copVenta:    m.cop_venta_mcop,
-      tipoPos:     m.tipo_posicion === 'vendedor' ? 'Vendedor' as const : 'Comprador' as const,
+      // Mock COP: compra_r=320, compra_nr=290, venta=380 COP/kWh
+      copCompraR:  m.compra_r_mwh  * 1_000 * PRECIO_MOCK_COMPRA_R  / 1_000_000,
+      copCompraNr: m.compra_nr_mwh * 1_000 * PRECIO_MOCK_COMPRA_NR / 1_000_000,
+      copVenta:    m.venta_mwh     * 1_000 * PRECIO_MOCK_VENTA     / 1_000_000,
+      tipoPos:     m.posicion_neta_mwh <= 0 ? 'Vendedor' as const : 'Comprador' as const,
     }))
   }, [wizPosicionMensual])
 

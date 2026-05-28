@@ -278,6 +278,81 @@ def calcular_posicion_neta(
     return df_posicion
 
 
+def calcular_posicion_periodo(
+    inventario: dict[str, pd.DataFrame],
+    fecha_inicio: str,
+    fecha_fin: str,
+) -> pd.DataFrame:
+    """
+    Calcula la posición neta horaria para un rango completo de fechas.
+
+    Para cada día real del período:
+      1. Determina el tipo de día (ordinario / sábado / domingo / festivo).
+      2. Obtiene la serie horaria de compra_r = TO[mes][hora] + tipo_día[mes][hora]
+         donde tipo_día es el inventario R que corresponde al día.
+      3. compra_nr = NR[mes][hora]
+      4. venta = venta[mes][hora]
+      5. posicion_neta = compra_r + compra_nr - venta
+
+    Los días fuera del período cubierto por los inventarios se omiten
+    silenciosamente (sin lanzar excepción).
+
+    Parámetros
+    ----------
+    inventario   : diccionario devuelto por cargar_inventario().
+    fecha_inicio : primer día del rango en formato YYYY-MM-DD (inclusive).
+    fecha_fin    : último día del rango en formato YYYY-MM-DD (inclusive).
+
+    Retorna
+    -------
+    DataFrame con columnas:
+        fecha, hora, tipo_dia, compra_r_kwh, compra_nr_kwh,
+        venta_kwh, posicion_neta_kwh
+    Ordenado por (fecha, hora). Vacío → lanza ValueError.
+    """
+    desde = datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
+    hasta = datetime.strptime(fecha_fin, "%Y-%m-%d").date()
+
+    fragmentos: list[pd.DataFrame] = []
+    dia_actual = desde
+
+    while dia_actual <= hasta:
+        fecha_str = dia_actual.isoformat()
+
+        # Calcular tipo_dia para anotarlo en el DataFrame resultante.
+        tipo_dia = _tipo_dia(datetime(dia_actual.year, dia_actual.month, dia_actual.day))
+
+        try:
+            # calcular_posicion_neta ya aplica TO + tipo_día internamente.
+            df_dia = calcular_posicion_neta(inventario, fecha_str)
+
+            # Agregar columnas de contexto al inicio del DataFrame.
+            df_dia.insert(0, "tipo_dia", tipo_dia)
+            df_dia.insert(0, "fecha", fecha_str)
+
+            fragmentos.append(df_dia)
+
+        except (ValueError, KeyError):
+            # Fecha fuera del período del inventario (ej. 2027 con Excel 2026).
+            pass
+
+        dia_actual += timedelta(days=1)
+
+    if not fragmentos:
+        raise ValueError(
+            f"No hay datos de inventario para el rango "
+            f"{fecha_inicio} a {fecha_fin}. "
+            "Verifica que los archivos de inventario cubran ese período."
+        )
+
+    df_resultado = (
+        pd.concat(fragmentos, ignore_index=True)
+        .sort_values(["fecha", "hora"])
+        .reset_index(drop=True)
+    )
+    return df_resultado
+
+
 def calcular_costo_bolsa(df_posicion: pd.DataFrame, df_pb_dia: pd.DataFrame) -> pd.DataFrame:
     """
     Calcula el costo/ingreso de bolsa por hora:

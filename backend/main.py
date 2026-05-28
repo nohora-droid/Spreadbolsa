@@ -27,6 +27,7 @@ from spread_engine import calcular_spread, cargar_pb_sql
 from portfolio_engine import (
     cargar_inventario,
     calcular_posicion_neta,
+    calcular_posicion_periodo,
     calcular_costo_bolsa,
     resumen_portafolio,
 )
@@ -68,11 +69,6 @@ app.add_middleware(
 
 METABASE_DATABASE_PB = 2344
 
-# Precios mock para el endpoint /portfolio/posicion (sin PB real).
-# Serán reemplazados por PPP real de Olibia cuando esté disponible.
-_MOCK_COMPRA_R_COP_KWH  = 320.0
-_MOCK_COMPRA_NR_COP_KWH = 290.0
-_MOCK_VENTA_COP_KWH     = 380.0
 
 
 
@@ -309,26 +305,29 @@ def spread(
 def portfolio_posicion(
     fecha_inicio: str = Query(
         ...,
-        description="Fecha inicio del período a simular (YYYY-MM-DD).",
+        description="Fecha inicio del período (YYYY-MM-DD, inclusive).",
     ),
     fecha_fin: str = Query(
         ...,
-        description="Fecha fin del período a simular (YYYY-MM-DD).",
+        description="Fecha fin del período (YYYY-MM-DD, inclusive).",
     ),
 ):
     """
-    Calcula la posición mensual del portafolio SIN necesitar precio de bolsa.
+    Calcula la posición energética del portafolio Olibia SIN precio de bolsa.
 
-    Itera todos los días del rango, calcula posicion_neta horaria desde los
-    inventarios Olibia (sin calcular_costo_bolsa) y agrega por mes.
+    Usa calcular_posicion_periodo() del motor:
+      - Itera cada día real del rango.
+      - Para cada día determina el tipo_dia (ordinario/sábado/domingo/festivo).
+      - Aplica compra_r = TO[mes][hora] + inventario_tipo_dia[mes][hora].
+      - Suma compra_nr = NR[mes][hora] y descuenta venta = venta[mes][hora].
 
-    Retorna:
-      meses: lista de { mes, compra_r_mwh, compra_nr_mwh, venta_mwh,
-                        posicion_neta_mwh, cop_compra_r_mcop, cop_compra_nr_mcop,
-                        cop_venta_mcop, tipo_posicion }
-
-    Los valores COP usan precios mock:
-      compra_r = 320 COP/kWh · compra_nr = 290 COP/kWh · venta = 380 COP/kWh
+    Retorna (todo en kWh, sin precios):
+      datos              : filas horarias  {fecha, hora, tipo_dia,
+                           compra_r_kwh, compra_nr_kwh, venta_kwh,
+                           posicion_neta_kwh}
+      resumen_mensual    : agregados mensuales en MWh + nro días
+      total_dias         : entero con total de días procesados
+      distribucion_tipo_dia : conteo por tipo (ordinarios/sabados/domingos/festivos)
     """
     _validar_fecha_iso(fecha_inicio, "fecha_inicio")
     _validar_fecha_iso(fecha_fin, "fecha_fin")
@@ -338,7 +337,7 @@ def portfolio_posicion(
             detail="fecha_inicio no puede ser posterior a fecha_fin.",
         )
 
-    # Cargar inventario una sola vez (7 archivos Excel de Olibia).
+    # a) Cargar los 7 archivos de inventario Olibia una sola vez.
     ruta_raiz = Path(__file__).parent.parent
     try:
         inventario = cargar_inventario(ruta_raiz)
@@ -348,75 +347,80 @@ def portfolio_posicion(
             detail=f"No fue posible cargar inventario: {error}",
         ) from error
 
-    # Iterar todos los días del rango y acumular por mes.
-    fecha_ini_dt = datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
-    fecha_fin_dt = datetime.strptime(fecha_fin, "%Y-%m-%d").date()
-
-    acumulado: dict[str, dict[str, float]] = {}
-    dias_ok:   dict[str, int]              = {}
-
-    dia_actual = fecha_ini_dt
-    while dia_actual <= fecha_fin_dt:
-        fecha_str = dia_actual.isoformat()
-        mes_key   = fecha_str[:7]   # "YYYY-MM"
-
-        if mes_key not in acumulado:
-            acumulado[mes_key] = {
-                "compra_r_kwh":     0.0,
-                "compra_nr_kwh":    0.0,
-                "venta_kwh":        0.0,
-                "posicion_neta_kwh": 0.0,
-            }
-            dias_ok[mes_key] = 0
-
-        try:
-            df_pos = calcular_posicion_neta(inventario, fecha_str)
-            acumulado[mes_key]["compra_r_kwh"]      += float(df_pos["compra_r_kwh"].sum())
-            acumulado[mes_key]["compra_nr_kwh"]     += float(df_pos["compra_nr_kwh"].sum())
-            acumulado[mes_key]["venta_kwh"]         += float(df_pos["venta_kwh"].sum())
-            acumulado[mes_key]["posicion_neta_kwh"] += float(df_pos["posicion_neta_kwh"].sum())
-            dias_ok[mes_key] += 1
-        except (ValueError, KeyError):
-            # Fecha fuera del período cubierto por los inventarios → se ignora.
-            pass
-
-        dia_actual += timedelta(days=1)
-
-    # Filtrar meses sin datos (período fuera del inventario).
-    meses_resultado = []
-    for mes, totales in sorted(acumulado.items()):
-        if dias_ok.get(mes, 0) == 0:
-            continue
-
-        compra_r_mwh      = totales["compra_r_kwh"]      / 1_000
-        compra_nr_mwh     = totales["compra_nr_kwh"]     / 1_000
-        venta_mwh         = totales["venta_kwh"]         / 1_000
-        posicion_neta_mwh = totales["posicion_neta_kwh"] / 1_000
-
-        meses_resultado.append({
-            "mes":               mes,
-            "compra_r_mwh":      round(compra_r_mwh,      3),
-            "compra_nr_mwh":     round(compra_nr_mwh,     3),
-            "venta_mwh":         round(venta_mwh,         3),
-            "posicion_neta_mwh": round(posicion_neta_mwh, 3),
-            # COP usando precios mock (placeholder hasta PPP real)
-            "cop_compra_r_mcop":  round(compra_r_mwh  * 1_000 * _MOCK_COMPRA_R_COP_KWH  / 1_000_000, 3),
-            "cop_compra_nr_mcop": round(compra_nr_mwh * 1_000 * _MOCK_COMPRA_NR_COP_KWH / 1_000_000, 3),
-            "cop_venta_mcop":     round(venta_mwh     * 1_000 * _MOCK_VENTA_COP_KWH     / 1_000_000, 3),
-            "tipo_posicion":      "vendedor" if posicion_neta_mwh <= 0 else "comprador",
-        })
-
-    if not meses_resultado:
+    # b) Calcular posición diaria/horaria para todo el rango.
+    try:
+        df = calcular_posicion_periodo(inventario, fecha_inicio, fecha_fin)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
         raise HTTPException(
-            status_code=404,
-            detail=(
-                f"No hay datos de inventario para el rango indicado "
-                f"({fecha_inicio} a {fecha_fin}). "
-                "Verifica que los archivos de inventario cubran ese período."
-            ),
-        )
+            status_code=500,
+            detail=f"Error calculando posición del portafolio: {error}",
+        ) from error
 
-    return {"meses": meses_resultado}
+    # c) Serializar filas horarias completas.
+    datos = [
+        {
+            "fecha":              str(fila["fecha"]),
+            "hora":               int(fila["hora"]),
+            "tipo_dia":           str(fila["tipo_dia"]),
+            "compra_r_kwh":       float(fila["compra_r_kwh"]),
+            "compra_nr_kwh":      float(fila["compra_nr_kwh"]),
+            "venta_kwh":          float(fila["venta_kwh"]),
+            "posicion_neta_kwh":  float(fila["posicion_neta_kwh"]),
+        }
+        for fila in df.to_dict(orient="records")
+    ]
+
+    # d) Resumen mensual: sumar kWh por mes y contar días únicos.
+    df["mes"] = df["fecha"].str[:7]
+
+    agg_kwh = (
+        df.groupby("mes")[
+            ["compra_r_kwh", "compra_nr_kwh", "venta_kwh", "posicion_neta_kwh"]
+        ]
+        .sum()
+        .reset_index()
+    )
+    dias_mes = (
+        df.groupby("mes")["fecha"]
+        .nunique()
+        .rename("dias")
+        .reset_index()
+    )
+    resumen_df = agg_kwh.merge(dias_mes, on="mes")
+
+    resumen_mensual = [
+        {
+            "mes":                str(fila["mes"]),
+            "compra_r_mwh":       round(float(fila["compra_r_kwh"])      / 1_000, 3),
+            "compra_nr_mwh":      round(float(fila["compra_nr_kwh"])     / 1_000, 3),
+            "venta_mwh":          round(float(fila["venta_kwh"])         / 1_000, 3),
+            "posicion_neta_mwh":  round(float(fila["posicion_neta_kwh"]) / 1_000, 3),
+            "dias":               int(fila["dias"]),
+        }
+        for fila in resumen_df.to_dict(orient="records")
+    ]
+
+    # e) Distribución de tipos de día (un conteo por fecha única).
+    conteo = (
+        df.drop_duplicates("fecha")["tipo_dia"]
+        .value_counts()
+        .to_dict()
+    )
+    distribucion_tipo_dia = {
+        "ordinarios": int(conteo.get("ordinario", 0)),
+        "sabados":    int(conteo.get("sabado",    0)),
+        "domingos":   int(conteo.get("domingo",   0)),
+        "festivos":   int(conteo.get("festivo",   0)),
+    }
+
+    return {
+        "datos":                datos,
+        "resumen_mensual":      resumen_mensual,
+        "total_dias":           int(df["fecha"].nunique()),
+        "distribucion_tipo_dia": distribucion_tipo_dia,
+    }
 
 
 @app.get("/portfolio")
