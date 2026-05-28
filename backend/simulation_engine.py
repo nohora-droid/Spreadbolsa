@@ -232,6 +232,14 @@ def simular_contrato(
 
     pb_promedio_global = sum(perfil_pb.values()) / 24.0
 
+    # Spread del contrato respecto al escenario de PB:
+    #   COMPRA: PB - precio  → positivo = conveniente (compro más barato que bolsa)
+    #   VENTA:  precio - PB  → positivo = conveniente (vendo más caro que bolsa)
+    if tipo == "compra":
+        spread_cop_kwh = pb_promedio_global - precio_cop_kwh
+    else:
+        spread_cop_kwh = precio_cop_kwh - pb_promedio_global
+
     # ═══════════════════════════════════════════════════════════════════════════
     # PASO 2 — Iterar sobre cada día real del período del CONTRATO
     # ═══════════════════════════════════════════════════════════════════════════
@@ -242,6 +250,8 @@ def simular_contrato(
 
     resultados_antes:   list[pd.DataFrame] = []
     resultados_despues: list[pd.DataFrame] = []
+    # Acumula la energía del nuevo contrato por mes (clave "YYYY-MM") en kWh
+    delta_energia_mensual: dict[str, float] = {}
 
     dia_actual = desde_contrato
     while dia_actual <= hasta_contrato:
@@ -274,6 +284,13 @@ def simular_contrato(
                 perfil_excel_12x24=perfil_excel_12x24,
             )
             delta_values = delta_kwh.values   # ndarray (24,)
+
+            # Acumular energía diaria del contrato por mes (para ahorro real)
+            mes_key_dia = fecha_str[:7]   # "YYYY-MM"
+            delta_energia_mensual[mes_key_dia] = (
+                delta_energia_mensual.get(mes_key_dia, 0.0)
+                + float(delta_kwh.sum())
+            )
 
             # ── 2d. Aplicar el nuevo contrato a la posición ───────────────────
             df_pos_nueva = df_pos_antes.copy()
@@ -344,26 +361,24 @@ def simular_contrato(
     resumen_antes   = _resumen(df_antes)
     resumen_despues = _resumen(df_despues)
 
-    # ── Semáforo de recomendación ─────────────────────────────────────────────
+    # ── Semáforo de recomendación (basado en spread vs PB del escenario) ─────
+    # spread_cop_kwh ya fue calculado en el PASO 1:
+    #   COMPRA: PB_promedio - precio_contrato  (> 0 → compro más barato que bolsa)
+    #   VENTA:  precio_contrato - PB_promedio  (> 0 → vendo más caro que bolsa)
+    # Umbrales: VERDE > +20 COP/kWh | AMARILLO entre -20 y +20 | ROJO < -20 COP/kWh
+    if spread_cop_kwh > 20:
+        recomendacion = "verde"
+    elif spread_cop_kwh >= -20:
+        recomendacion = "amarillo"
+    else:
+        recomendacion = "rojo"
+
+    # delta_costo_mcop se mantiene como métrica informativa (diferencia de costos de bolsa)
     delta_costo_mcop = round(
         float(resumen_despues["costo_bolsa_total_mcop"])
         - float(resumen_antes["costo_bolsa_total_mcop"]),
         2,
     )
-    mejora_costo = delta_costo_mcop < 0
-    delta_pos_mwh = (
-        float(resumen_despues["posicion_neta_total_mwh"])
-        - float(resumen_antes["posicion_neta_total_mwh"])
-    )
-    # Venta mejora si reduce la posición neta; compra mejora si reduce el costo.
-    mejora_posicion = (delta_pos_mwh < 0) if tipo == "venta" else mejora_costo
-
-    if mejora_costo and mejora_posicion:
-        recomendacion = "verde"
-    elif mejora_costo or mejora_posicion:
-        recomendacion = "amarillo"
-    else:
-        recomendacion = "rojo"
 
     # ── Perfil horario promedio (24h) para el gráfico comparativo ────────────
     agg_pa  = df_antes.groupby("hora")["posicion_neta_kwh"].mean().reset_index()
@@ -397,10 +412,17 @@ def simular_contrato(
     por_mes = []
     for periodo_idx, row in mm.iterrows():
         etiqueta      = f"{MES_ABR[periodo_idx.month]}-{str(periodo_idx.year)[-2:]}"
+        mes_str       = f"{periodo_idx.year}-{periodo_idx.month:02d}"   # "YYYY-MM"
         pos_antes_mwh = float(row["pos_kwh_a"])   / 1_000
         pos_nueva_mwh = float(row["pos_kwh_d"])   / 1_000
         costo_antes   = float(row["costo_cop_a"]) / 1_000_000
         costo_nuevo   = float(row["costo_cop_d"]) / 1_000_000
+
+        # Ahorro real = spread × energía del contrato en ese mes
+        # (spread > 0 → ahorro positivo; spread < 0 → costo adicional)
+        energia_mes_kwh = delta_energia_mensual.get(mes_str, 0.0)
+        ahorro_mes = round(spread_cop_kwh * energia_mes_kwh / 1_000_000, 2)
+
         por_mes.append({
             "mes":               etiqueta,
             "pos_actual_mwh":    round(pos_antes_mwh,                   2),
@@ -408,8 +430,23 @@ def simular_contrato(
             "diferencia_mwh":    round(pos_nueva_mwh - pos_antes_mwh,   2),
             "costo_actual_mcop": round(costo_antes,                     2),
             "costo_nuevo_mcop":  round(costo_nuevo,                     2),
-            "ahorro_mcop":       round(costo_antes - costo_nuevo,       2),
+            "ahorro_mcop":       ahorro_mes,
         })
+
+    # Texto del punto de equilibrio para mostrar en el frontend
+    accion      = "compra" if tipo == "compra" else "venta"
+    signo_str   = f"+{spread_cop_kwh:.1f}" if spread_cop_kwh >= 0 else f"{spread_cop_kwh:.1f}"
+    breakeven = {
+        "precio_contrato_cop_kwh":   round(precio_cop_kwh,      2),
+        "pb_promedio_escenario_cop_kwh": round(pb_promedio_global, 2),
+        "spread_cop_kwh":            round(spread_cop_kwh,       2),
+        "descripcion": (
+            f"El contrato es indiferente cuando PB = precio_contrato = "
+            f"{precio_cop_kwh:.1f} COP/kWh. "
+            f"Con PB promedio del escenario de {pb_promedio_global:.1f} COP/kWh, "
+            f"el spread de {accion} es {signo_str} COP/kWh."
+        ),
+    }
 
     # ── Log informativo ───────────────────────────────────────────────────────
     print(
@@ -419,6 +456,7 @@ def simular_contrato(
         f"contrato={contrato_inicio}..{contrato_fin} "
         f"dias_procesados={df_antes['fecha'].nunique()} "
         f"pb_prom_global={pb_promedio_global:.1f} COP/kWh "
+        f"spread={spread_cop_kwh:+.1f} COP/kWh "
         f"recomendacion={recomendacion} delta={delta_costo_mcop:+.2f}M COP"
     )
 
@@ -429,6 +467,10 @@ def simular_contrato(
         # Semáforo y variación económica
         "recomendacion":    recomendacion,
         "delta_costo_mcop": delta_costo_mcop,
+        # Spread del contrato vs PB del escenario
+        "spread_cop_kwh":   round(spread_cop_kwh, 2),
+        # Punto de equilibrio y descripción textual
+        "breakeven": breakeven,
         # Gráfico horario comparativo (promedio de todos los días del contrato)
         "perfil_horario": perfil_horario_lista,
         # Tabla mensual — siempre meses del contrato, nunca del escenario PB
