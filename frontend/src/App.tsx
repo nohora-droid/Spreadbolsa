@@ -15,6 +15,7 @@ import {
 
 const API_BASE = 'http://127.0.0.1:8000/spread'
 const API_PORTFOLIO = 'http://127.0.0.1:8000/portfolio'
+const API_POSICION   = 'http://127.0.0.1:8000/portfolio/posicion'
 const API_SIMULATE = 'http://127.0.0.1:8000/simulate'
 
 const MESES_ES = [
@@ -124,6 +125,19 @@ interface FilaPortfolio {
   venta: number
   posicion_neta: number
   costo_bolsa: number
+}
+
+/** Respuesta del endpoint /portfolio/posicion — un objeto por mes, sin PB. */
+interface FilaPosicionMensual {
+  mes: string                          // "YYYY-MM"
+  compra_r_mwh: number
+  compra_nr_mwh: number
+  venta_mwh: number
+  posicion_neta_mwh: number
+  cop_compra_r_mcop: number
+  cop_compra_nr_mcop: number
+  cop_venta_mcop: number
+  tipo_posicion: 'vendedor' | 'comprador'
 }
 
 interface PortfolioResumen {
@@ -466,7 +480,7 @@ function App() {
   // Paso 1 — Período
   const [wizPeriodoInicio, setWizPeriodoInicio] = useState('2026-01-01')
   const [wizPeriodoFin, setWizPeriodoFin]       = useState('2026-12-31')
-  const [wizPortfolioDatos,    setWizPortfolioDatos]    = useState<FilaPortfolio[]>([])
+  const [wizPosicionMensual,   setWizPosicionMensual]   = useState<FilaPosicionMensual[]>([])
   const [wizPortfolioCargando, setWizPortfolioCargando] = useState(false)
   const [wizPortfolioError,    setWizPortfolioError]    = useState<string | null>(null)
 
@@ -684,12 +698,11 @@ function App() {
   async function wizCargarPosicion() {
     setWizPortfolioCargando(true); setWizPortfolioError(null)
     try {
-      const resp = await fetch(`${API_PORTFOLIO}?fecha_inicio=${wizPeriodoInicio}&fecha_fin=${wizPeriodoFin}`)
+      const resp = await fetch(`${API_POSICION}?fecha_inicio=${wizPeriodoInicio}&fecha_fin=${wizPeriodoFin}`)
       if (!resp.ok) { const c = await resp.json().catch(() => null); throw new Error(c?.detail ?? `Error ${resp.status}`) }
       const json = await resp.json()
-      const candidatos = Array.isArray(json?.datos) ? json.datos : Array.isArray(json) ? json : []
-      setWizPortfolioDatos(candidatos.map(parseFilaPortfolio).filter(Boolean) as FilaPortfolio[])
-    } catch (err) { setWizPortfolioError(err instanceof Error ? err.message : 'Error'); setWizPortfolioDatos([]) }
+      setWizPosicionMensual(Array.isArray(json?.meses) ? json.meses : [])
+    } catch (err) { setWizPortfolioError(err instanceof Error ? err.message : 'Error'); setWizPosicionMensual([]) }
     finally { setWizPortfolioCargando(false) }
   }
 
@@ -726,7 +739,7 @@ function App() {
     finally { setWizSimCargando(false) }
   }
 
-  function wizReset() { setWizPaso(1); setWizPortfolioDatos([]); setWizPortfolioError(null); setWizPBDatos([]); setWizPBError(null); setWizResultado(null); setWizSimError(null); setWizSimExcel12x24(null); setWizSimExcelNombre('') }
+  function wizReset() { setWizPaso(1); setWizPosicionMensual([]); setWizPortfolioError(null); setWizPBDatos([]); setWizPBError(null); setWizResultado(null); setWizSimError(null); setWizSimExcel12x24(null); setWizSimExcelNombre('') }
 
   function wizDescargarJSON() {
     if (!wizResultado) return
@@ -769,21 +782,18 @@ function App() {
   }
 
   const wizResumenMensual = useMemo(() => {
-    if (wizPortfolioDatos.length === 0) return []
-    const mapa = new Map<string, FilaPortfolio[]>()
-    for (const f of wizPortfolioDatos) { const mes = normalizarFecha(f.fecha).slice(0, 7); const arr = mapa.get(mes) ?? []; arr.push(f); mapa.set(mes, arr) }
-    return [...mapa.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([mes, filas]) => {
-      const compraRmwh  = filas.reduce((s, f) => s + f.compra_r,  0) / 1000
-      const compraNrmwh = filas.reduce((s, f) => s + f.compra_nr, 0) / 1000
-      const ventaMwh    = filas.reduce((s, f) => s + f.venta,     0) / 1000
-      const posNetaMwh  = filas.reduce((s, f) => s + f.posicion_neta, 0) / 1000
-      return { mes, compraRmwh, compraNrmwh, ventaMwh, posNetaMwh,
-        copCompraR:  compraRmwh  * 1000 * PRECIO_MOCK_COMPRA_R  / 1_000_000,
-        copCompraNr: compraNrmwh * 1000 * PRECIO_MOCK_COMPRA_NR / 1_000_000,
-        copVenta:    ventaMwh    * 1000 * PRECIO_MOCK_VENTA      / 1_000_000,
-        tipoPos: posNetaMwh < 0 ? 'Vendedor' as const : 'Comprador' as const }
-    })
-  }, [wizPortfolioDatos])
+    return wizPosicionMensual.map(m => ({
+      mes:         m.mes,
+      compraRmwh:  m.compra_r_mwh,
+      compraNrmwh: m.compra_nr_mwh,
+      ventaMwh:    m.venta_mwh,
+      posNetaMwh:  m.posicion_neta_mwh,
+      copCompraR:  m.cop_compra_r_mcop,
+      copCompraNr: m.cop_compra_nr_mcop,
+      copVenta:    m.cop_venta_mcop,
+      tipoPos:     m.tipo_posicion === 'vendedor' ? 'Vendedor' as const : 'Comprador' as const,
+    }))
+  }, [wizPosicionMensual])
 
   const wizPBPromedioGlobal = useMemo(() => {
     if (wizPBDatos.length === 0) return null

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 
@@ -67,6 +67,12 @@ app.add_middleware(
 # ID de la base de datos en Metabase para consultas SQL nativas (price_pb_hourly).
 
 METABASE_DATABASE_PB = 2344
+
+# Precios mock para el endpoint /portfolio/posicion (sin PB real).
+# Serán reemplazados por PPP real de Olibia cuando esté disponible.
+_MOCK_COMPRA_R_COP_KWH  = 320.0
+_MOCK_COMPRA_NR_COP_KWH = 290.0
+_MOCK_VENTA_COP_KWH     = 380.0
 
 
 
@@ -297,6 +303,120 @@ def spread(
             detail=f"No se pudieron obtener los datos de precio de bolsa: {error}",
 
         ) from error
+
+
+@app.get("/portfolio/posicion")
+def portfolio_posicion(
+    fecha_inicio: str = Query(
+        ...,
+        description="Fecha inicio del período a simular (YYYY-MM-DD).",
+    ),
+    fecha_fin: str = Query(
+        ...,
+        description="Fecha fin del período a simular (YYYY-MM-DD).",
+    ),
+):
+    """
+    Calcula la posición mensual del portafolio SIN necesitar precio de bolsa.
+
+    Itera todos los días del rango, calcula posicion_neta horaria desde los
+    inventarios Olibia (sin calcular_costo_bolsa) y agrega por mes.
+
+    Retorna:
+      meses: lista de { mes, compra_r_mwh, compra_nr_mwh, venta_mwh,
+                        posicion_neta_mwh, cop_compra_r_mcop, cop_compra_nr_mcop,
+                        cop_venta_mcop, tipo_posicion }
+
+    Los valores COP usan precios mock:
+      compra_r = 320 COP/kWh · compra_nr = 290 COP/kWh · venta = 380 COP/kWh
+    """
+    _validar_fecha_iso(fecha_inicio, "fecha_inicio")
+    _validar_fecha_iso(fecha_fin, "fecha_fin")
+    if fecha_inicio > fecha_fin:
+        raise HTTPException(
+            status_code=400,
+            detail="fecha_inicio no puede ser posterior a fecha_fin.",
+        )
+
+    # Cargar inventario una sola vez (7 archivos Excel de Olibia).
+    ruta_raiz = Path(__file__).parent.parent
+    try:
+        inventario = cargar_inventario(ruta_raiz)
+    except Exception as error:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No fue posible cargar inventario: {error}",
+        ) from error
+
+    # Iterar todos los días del rango y acumular por mes.
+    fecha_ini_dt = datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
+    fecha_fin_dt = datetime.strptime(fecha_fin, "%Y-%m-%d").date()
+
+    acumulado: dict[str, dict[str, float]] = {}
+    dias_ok:   dict[str, int]              = {}
+
+    dia_actual = fecha_ini_dt
+    while dia_actual <= fecha_fin_dt:
+        fecha_str = dia_actual.isoformat()
+        mes_key   = fecha_str[:7]   # "YYYY-MM"
+
+        if mes_key not in acumulado:
+            acumulado[mes_key] = {
+                "compra_r_kwh":     0.0,
+                "compra_nr_kwh":    0.0,
+                "venta_kwh":        0.0,
+                "posicion_neta_kwh": 0.0,
+            }
+            dias_ok[mes_key] = 0
+
+        try:
+            df_pos = calcular_posicion_neta(inventario, fecha_str)
+            acumulado[mes_key]["compra_r_kwh"]      += float(df_pos["compra_r_kwh"].sum())
+            acumulado[mes_key]["compra_nr_kwh"]     += float(df_pos["compra_nr_kwh"].sum())
+            acumulado[mes_key]["venta_kwh"]         += float(df_pos["venta_kwh"].sum())
+            acumulado[mes_key]["posicion_neta_kwh"] += float(df_pos["posicion_neta_kwh"].sum())
+            dias_ok[mes_key] += 1
+        except (ValueError, KeyError):
+            # Fecha fuera del período cubierto por los inventarios → se ignora.
+            pass
+
+        dia_actual += timedelta(days=1)
+
+    # Filtrar meses sin datos (período fuera del inventario).
+    meses_resultado = []
+    for mes, totales in sorted(acumulado.items()):
+        if dias_ok.get(mes, 0) == 0:
+            continue
+
+        compra_r_mwh      = totales["compra_r_kwh"]      / 1_000
+        compra_nr_mwh     = totales["compra_nr_kwh"]     / 1_000
+        venta_mwh         = totales["venta_kwh"]         / 1_000
+        posicion_neta_mwh = totales["posicion_neta_kwh"] / 1_000
+
+        meses_resultado.append({
+            "mes":               mes,
+            "compra_r_mwh":      round(compra_r_mwh,      3),
+            "compra_nr_mwh":     round(compra_nr_mwh,     3),
+            "venta_mwh":         round(venta_mwh,         3),
+            "posicion_neta_mwh": round(posicion_neta_mwh, 3),
+            # COP usando precios mock (placeholder hasta PPP real)
+            "cop_compra_r_mcop":  round(compra_r_mwh  * 1_000 * _MOCK_COMPRA_R_COP_KWH  / 1_000_000, 3),
+            "cop_compra_nr_mcop": round(compra_nr_mwh * 1_000 * _MOCK_COMPRA_NR_COP_KWH / 1_000_000, 3),
+            "cop_venta_mcop":     round(venta_mwh     * 1_000 * _MOCK_VENTA_COP_KWH     / 1_000_000, 3),
+            "tipo_posicion":      "vendedor" if posicion_neta_mwh <= 0 else "comprador",
+        })
+
+    if not meses_resultado:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No hay datos de inventario para el rango indicado "
+                f"({fecha_inicio} a {fecha_fin}). "
+                "Verifica que los archivos de inventario cubran ese período."
+            ),
+        )
+
+    return {"meses": meses_resultado}
 
 
 @app.get("/portfolio")
