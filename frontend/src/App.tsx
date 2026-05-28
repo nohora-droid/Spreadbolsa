@@ -735,6 +735,25 @@ function App() {
   }
 
   async function cargarSimulacion() {
+    // ── Validate date ranges ──────────────────────────────────────────────────
+    const diffMesesPB = (() => {
+      const d1 = new Date(pbDesde)
+      const d2 = new Date(pbHasta)
+      return (d2.getFullYear() - d1.getFullYear()) * 12 + (d2.getMonth() - d1.getMonth()) + 1
+    })()
+    if (diffMesesPB < 1) {
+      setSimError('El período de PB histórico debe tener al menos 1 mes.')
+      return
+    }
+    if (diffMesesPB > 36) {
+      setSimError(
+        `El período de PB histórico tiene ${diffMesesPB} meses. ` +
+        'Usa un rango de máximo 36 meses para evitar timeout — ' +
+        'o selecciona un escenario ENSO predefinido.',
+      )
+      return
+    }
+
     // ── Validate profile configuration ───────────────────────────────────────
     if (simPerfilTipo === 'excel' && !simExcel12x24) {
       setSimError('Carga un archivo Excel antes de simular.')

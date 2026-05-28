@@ -5,6 +5,7 @@ Motor de transformación y cálculo de spread para precios de bolsa (PB).
 from __future__ import annotations
 
 from datetime import datetime
+import time
 
 import pandas as pd
 
@@ -142,24 +143,41 @@ def cargar_pb_sql(
     chunks_exitosos: list[pd.DataFrame] = []
     chunks_fallidos = 0
 
+    _PAUSA_ENTRE_CHUNKS = 0.15   # segundos entre llamadas — evita rate-limit de Metabase
+    _MAX_REINTENTOS      = 2     # reintentos adicionales por chunk ante error transitorio
+
     for indice, (chunk_inicio, chunk_fin) in enumerate(rangos_mensuales, start=1):
         print(f"  Chunk {indice}/{len(rangos_mensuales)}: {chunk_inicio} a {chunk_fin}")
 
+        # Pequeña pausa para no saturar Metabase con llamadas consecutivas rápidas
+        if indice > 1:
+            time.sleep(_PAUSA_ENTRE_CHUNKS)
+
         sql = _sql_pb_rango(chunk_inicio, chunk_fin)
 
-        try:
-            # Una consulta Metabase por mes para no superar el límite de 2000 filas
-            df_chunk = load_metabase_sql(sql, database_id)
-        except Exception as error:
-            chunks_fallidos += 1
-            print(
-                f"  Error en chunk {chunk_inicio} a {chunk_fin} "
-                f"(database_id={database_id}): {error}. Se continúa con el siguiente."
-            )
-            continue
+        df_chunk = None
+        for intento in range(1, _MAX_REINTENTOS + 2):   # hasta 3 intentos
+            try:
+                df_chunk = load_metabase_sql(sql, database_id)
+                break   # éxito: salir del loop de reintentos
+            except Exception as error:
+                if intento <= _MAX_REINTENTOS:
+                    espera = intento * 1.0   # backoff: 1 s, 2 s, …
+                    print(
+                        f"  Intento {intento} fallido para chunk {chunk_inicio}..{chunk_fin}: "
+                        f"{error}. Reintentando en {espera:.1f} s…"
+                    )
+                    time.sleep(espera)
+                else:
+                    chunks_fallidos += 1
+                    print(
+                        f"  Chunk {chunk_inicio} a {chunk_fin}: todos los intentos fallaron "
+                        f"({error}). Se continúa con el siguiente."
+                    )
 
-        if df_chunk.empty:
-            print(f"  Chunk {chunk_inicio} a {chunk_fin}: sin filas.")
+        if df_chunk is None or df_chunk.empty:
+            if df_chunk is not None:
+                print(f"  Chunk {chunk_inicio} a {chunk_fin}: sin filas.")
             continue
 
         # Verificar columnas del SELECT en este chunk

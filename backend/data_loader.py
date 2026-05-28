@@ -93,7 +93,7 @@ def load_metabase_card(card_id: int | str, limit: int = 10000) -> pd.DataFrame:
         solicitud = urllib.request.Request(
             url, data=cuerpo_post, headers=headers, method="POST"
         )
-        with urllib.request.urlopen(solicitud) as respuesta:
+        with urllib.request.urlopen(solicitud, timeout=60) as respuesta:
             cuerpo = respuesta.read().decode("utf-8")
             datos = json.loads(cuerpo)
 
@@ -216,7 +216,7 @@ def load_metabase_card_rango(
         solicitud = urllib.request.Request(
             url, data=cuerpo_post, headers=headers, method="POST"
         )
-        with urllib.request.urlopen(solicitud) as respuesta:
+        with urllib.request.urlopen(solicitud, timeout=60) as respuesta:
             cuerpo = respuesta.read().decode("utf-8")
             datos = json.loads(cuerpo)
 
@@ -327,7 +327,8 @@ def load_metabase_sql(
         solicitud = urllib.request.Request(
             url, data=cuerpo_post, headers=headers, method="POST"
         )
-        with urllib.request.urlopen(solicitud) as respuesta:
+        # timeout=60 s: evita que urllib quede colgado en conexiones lentas/caídas.
+        with urllib.request.urlopen(solicitud, timeout=60) as respuesta:
             cuerpo = respuesta.read().decode("utf-8")
             datos = json.loads(cuerpo)
 
