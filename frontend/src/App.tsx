@@ -2599,6 +2599,9 @@ function App() {
                         </div>
                       </div>
 
+                      {/* Explicación dinámica de resultados */}
+                      <PanelExplicacion resultado={simResultado} simTipo={simTipo} />
+
                       {/* PARTE D — KPI comparativas */}
                       <div className="grid grid-cols-2 gap-3">
                         <SimCompareCard
@@ -2852,6 +2855,97 @@ function SimCompareCard({
             : `${signo}${formato(delta)}`}
         </p>
       )}
+    </div>
+  )
+}
+
+function PanelExplicacion({
+  resultado,
+  simTipo,
+}: {
+  resultado: SimResultado
+  simTipo: SimTipo
+}) {
+  const ra = resultado.resumen_antes
+  const rd = resultado.resumen_despues
+
+  const posAntes = ra.posicion_neta_total_mwh
+  const posNueva = rd.posicion_neta_total_mwh
+  const deltaMwh = posNueva - posAntes
+  const costoAntes = ra.costo_bolsa_total_mcop
+  const costoNuevo = rd.costo_bolsa_total_mcop
+
+  const esVendedor = posAntes < 0
+  const posAbsAntes = Math.abs(posAntes)
+  const posAbsNueva = Math.abs(posNueva)
+  const absDelta = Math.abs(deltaMwh)
+
+  return (
+    <div className="rounded-xl border border-gray-700/60 bg-gray-950/70 p-4">
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 shrink-0 text-base leading-none text-blue-400">ℹ</span>
+        <div className="min-w-0">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-500">
+            ¿Cómo leer estos resultados?
+          </p>
+          <div className="space-y-2 text-sm leading-relaxed text-gray-300">
+            {esVendedor ? (
+              <>
+                <p>
+                  BIA tiene{' '}
+                  <span className="font-semibold text-white">
+                    posición vendedora neta de {formatMiles(posAbsAntes, 0)} MWh
+                  </span>{' '}
+                  en el período. Esto significa que BIA vende más energía de la que compra,
+                  generando un{' '}
+                  <span className="font-semibold text-emerald-400">
+                    ingreso de bolsa de {formatMiles(Math.abs(costoAntes), 2)} M COP
+                  </span>
+                  .
+                </p>
+                <p>
+                  Con el nuevo contrato de{' '}
+                  <span className="font-semibold text-white">{simTipo}</span>, la posición
+                  cambia a{' '}
+                  <span className="font-semibold text-white">
+                    {formatMiles(posAbsNueva, 0)} MWh
+                  </span>{' '}
+                  ({simTipo === 'compra' ? 'mejora' : 'empeora'} en {formatMiles(absDelta, 0)}{' '}
+                  MWh).{' '}
+                  {simTipo === 'compra'
+                    ? 'El nuevo contrato reduce la exposición vendedora.'
+                    : 'El nuevo contrato aumenta la posición vendedora.'}
+                </p>
+              </>
+            ) : (
+              <>
+                <p>
+                  BIA tiene{' '}
+                  <span className="font-semibold text-white">
+                    posición compradora neta de {formatMiles(posAntes, 0)} MWh
+                  </span>
+                  . Esto significa que BIA necesita comprar energía en bolsa, con un{' '}
+                  <span className="font-semibold text-red-400">
+                    costo estimado de {formatMiles(costoAntes, 2)} M COP
+                  </span>
+                  .
+                </p>
+                <p>
+                  Con el nuevo contrato de{' '}
+                  <span className="font-semibold text-white">{simTipo}</span>, el costo cambia
+                  a{' '}
+                  <span
+                    className={`font-semibold ${costoNuevo <= costoAntes ? 'text-emerald-400' : 'text-red-400'}`}
+                  >
+                    {formatMiles(costoNuevo, 2)} M COP
+                  </span>
+                  .
+                </p>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

@@ -77,16 +77,27 @@ def _generar_rangos_anuales(fecha_inicio: str, fecha_fin: str) -> list[tuple[str
 
 
 def _sql_pb_rango(fecha_inicio: str, fecha_fin: str) -> str:
-    """Arma la consulta SQL de PB para un sub-rango de fechas."""
+    """
+    Arma la consulta SQL de PB para un sub-rango de fechas.
+
+    Prioridad de versión por fecha:
+      1. Tx2  — disponible desde mayo 2026 en adelante
+      2. Tx1  — disponible desde mayo 2026 en adelante
+      3. TxF  — cubre todo el histórico (2010-01-01 a 2026-04-30)
+    El COALESCE garantiza que siempre se seleccione alguna versión,
+    incluso para fechas históricas donde sólo existe TxF.
+    """
     return f"""
 SELECT p.file_date, p.hour, p.pb
 FROM energy.price_pb_hourly p
 INNER JOIN (
     SELECT
         file_date,
-        MAX(CASE WHEN version_file = 'Tx2' THEN 'Tx2'
-                 WHEN version_file = 'Tx1' THEN 'Tx1'
-                 END) as version_preferida
+        COALESCE(
+            MAX(CASE WHEN version_file = 'Tx2' THEN 'Tx2' END),
+            MAX(CASE WHEN version_file = 'Tx1' THEN 'Tx1' END),
+            MAX(version_file)
+        ) AS version_preferida
     FROM energy.price_pb_hourly
     WHERE file_date BETWEEN '{fecha_inicio}' AND '{fecha_fin}'
     GROUP BY file_date
