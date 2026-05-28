@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+﻿import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import * as XLSX from 'xlsx'
 import {
   Bar,
@@ -52,27 +52,28 @@ const COLORES_MES_COMPARATIVO = [
   { text: 'text-orange-400', bg: 'bg-orange-500/15', ring: 'ring-orange-500/40' },
 ] as const
 
-const ENSO_OPCIONES = [
-  { key: 'nino_2015',    label: 'El Niño Fuerte (2015-2016)',       inicio: '2015-03-01', fin: '2016-05-31' },
-  { key: 'nina_2020',    label: 'La Niña Persistente (2020-2022)',   inicio: '2020-09-01', fin: '2022-03-31' },
-  { key: 'nino_2023',    label: 'El Niño Fuerte (2023-2024)',        inicio: '2023-06-01', fin: '2024-05-31' },
-  { key: 'neutral_2025', label: 'Neutral (2025)',                    inicio: '2025-01-01', fin: '2025-12-31' },
+const ENSO_COMPLETO = [
+  { key: 'nino_2010q1',  label: 'El Niño Fuerte (2010 Q1)',           fenomeno: 'nino',    intensidad: 'Fuerte',      pb_desde: '2010-01-01', pb_hasta: '2010-03-31' },
+  { key: 'nina_2010q3',  label: 'La Niña Fuerte (2010 Q3)',           fenomeno: 'nina',    intensidad: 'Fuerte',      pb_desde: '2010-07-01', pb_hasta: '2010-09-30' },
+  { key: 'nina_2011',    label: 'La Niña Moderada (2011)',            fenomeno: 'nina',    intensidad: 'Moderada',    pb_desde: '2011-01-01', pb_hasta: '2011-12-31' },
+  { key: 'nino_2015',    label: 'El Niño Muy Fuerte (2015-2016)',     fenomeno: 'nino',    intensidad: 'Muy fuerte',  pb_desde: '2015-01-01', pb_hasta: '2016-05-31' },
+  { key: 'nina_2020',    label: 'La Niña Persistente (2020-2022)',    fenomeno: 'nina',    intensidad: 'Persistente', pb_desde: '2020-09-01', pb_hasta: '2022-03-31' },
+  { key: 'nino_2023',    label: 'El Niño Fuerte (2023-2024)',         fenomeno: 'nino',    intensidad: 'Fuerte',      pb_desde: '2023-06-01', pb_hasta: '2024-05-31' },
+  { key: 'neutral_2025', label: 'Neutral / Transición (2025)',        fenomeno: 'neutral', intensidad: 'Débil',       pb_desde: '2025-01-01', pb_hasta: '2025-12-31' },
 ] as const
 
-// Curva solar típica para Colombia (ecuatorial) — suma = 1.0
-// H1-H6 y H19-H24 = 0; H7-H12 sube, H13-H18 baja
-const SOLAR_PESOS_24H: number[] = [
-  0,    0,    0,    0,    0,    0,     // H1-H6
-  0.02, 0.06, 0.11, 0.15, 0.15, 0.14, // H7-H12
-  0.12, 0.10, 0.08, 0.05, 0.02, 0,    // H13-H18
-  0,    0,    0,    0,    0,    0,     // H19-H24
-]
+type EnsoKey = typeof ENSO_COMPLETO[number]['key']
+
+const PRECIO_MOCK_COMPRA_R  = 320
+const PRECIO_MOCK_COMPRA_NR = 290
+const PRECIO_MOCK_VENTA     = 380
+
 
 type VistaAnalisis = 'dia' | 'mes' | 'comparativo'
 type DashboardTab = 'spread' | 'portafolio' | 'simulador'
 type SimTipo = 'compra' | 'venta'
 type SimMercado = 'regulado' | 'no_regulado' | 'ambos'
-type SimFuentePB = 'historico' | 'enso'
+type WizFuentePB = 'historico' | 'enso' | 'proyectado'
 type SimPerfilTipo = 'plano' | 'bloques' | 'solar' | 'excel'
 type SimRecomendacion = 'verde' | 'amarillo' | 'rojo'
 
@@ -316,9 +317,6 @@ function pbPromedioPorHoraMes(
   })
 }
 
-function formatNumeroMillonesCOP(valor: number): string {
-  return formatNumero(valor / 1_000_000, 2)
-}
 
 function formatMiles(valor: number, decimales = 2): string {
   return valor.toLocaleString('en-US', {
@@ -462,30 +460,43 @@ function App() {
   // Controla que el portafolio se cargue automáticamente sólo la primera vez
   const portfolioCargadoRef = useRef(false)
 
-  // ── Simulador ──────────────────────────────────────────────────────────────
-  const [simFuentePB, setSimFuentePB] = useState<SimFuentePB>('historico')
-  const [simEnso, setSimEnso] = useState('nino_2023')
-  const [simTipo, setSimTipo] = useState<SimTipo>('compra')
-  const [simContraparte, setSimContraparte] = useState('')
-  const [simEnergiaMwh, setSimEnergiaMwh] = useState(1000)
-  const [simPrecio, setSimPrecio] = useState(350)
-  // Estado A — Período del PB histórico (fuente de datos de bolsa)
-  const [pbDesde, setPbDesde] = useState('2026-01-01')
-  const [pbHasta, setPbHasta] = useState('2026-12-31')
-  // Estado C — Vigencia del nuevo contrato simulado
-  const [contratoInicio, setContratoInicio] = useState('2026-01-01')
-  const [contratoFin, setContratoFin] = useState('2026-12-31')
-  const [simTipoMercado, setSimTipoMercado] = useState<SimMercado>('regulado')
-  const [simPerfilTipo, setSimPerfilTipo] = useState<SimPerfilTipo>('plano')
-  const [simBloques, setSimBloques] = useState<SimBloque[]>([
-    { horaInicio: 8, horaFin: 17, mwhMes: 1000 },
-  ])
-  const [simExcel12x24, setSimExcel12x24] = useState<number[][] | null>(null)
-  const [simExcelNombre, setSimExcelNombre] = useState('')
-  const [simResultado, setSimResultado] = useState<SimResultado | null>(null)
-  const [simCargando, setSimCargando] = useState(false)
-  const [simError, setSimError] = useState<string | null>(null)
-  const simExcelInputRef = useRef<HTMLInputElement>(null)
+  // ── Wizard ─────────────────────────────────────────────────────────────────
+  const [wizPaso, setWizPaso] = useState(1)
+
+  // Paso 1 — Período
+  const [wizPeriodoInicio, setWizPeriodoInicio] = useState('2026-01-01')
+  const [wizPeriodoFin, setWizPeriodoFin]       = useState('2026-12-31')
+  const [wizPortfolioDatos,    setWizPortfolioDatos]    = useState<FilaPortfolio[]>([])
+  const [wizPortfolioCargando, setWizPortfolioCargando] = useState(false)
+  const [wizPortfolioError,    setWizPortfolioError]    = useState<string | null>(null)
+
+  // Paso 2 — Escenario PB
+  const [wizFuentePB, setWizFuentePB] = useState<WizFuentePB>('enso')
+  const [wizEnsoKey,  setWizEnsoKey]  = useState<EnsoKey>('nino_2023')
+  const [wizPBDesde,  setWizPBDesde]  = useState('2023-06-01')
+  const [wizPBHasta,  setWizPBHasta]  = useState('2024-05-31')
+  const [wizPBDatos,    setWizPBDatos]    = useState<FilaSpread[]>([])
+  const [wizPBCargando, setWizPBCargando] = useState(false)
+  const [wizPBError,    setWizPBError]    = useState<string | null>(null)
+
+  // Paso 3 — Nuevo contrato
+  const [wizSimTipo,        setWizSimTipo]        = useState<SimTipo>('compra')
+  const [wizSimContraparte, setWizSimContraparte] = useState('')
+  const [wizSimPrecio,      setWizSimPrecio]      = useState(350)
+  const [wizSimPerfilTipo,  setWizSimPerfilTipo]  = useState<SimPerfilTipo>('plano')
+  const [wizSimEnergiaMwh,  setWizSimEnergiaMwh]  = useState(1000)
+  const [wizSimBloques,     setWizSimBloques]     = useState<SimBloque[]>([{ horaInicio: 8, horaFin: 17, mwhMes: 1000 }])
+  const [wizSimExcel12x24,  setWizSimExcel12x24]  = useState<number[][] | null>(null)
+  const [wizSimExcelNombre, setWizSimExcelNombre] = useState('')
+  const [wizContratoInicio, setWizContratoInicio] = useState('2026-01-01')
+  const [wizContratoFin,    setWizContratoFin]    = useState('2026-12-31')
+  const [wizSimTipoMercado, setWizSimTipoMercado] = useState<SimMercado>('regulado')
+  const wizExcelInputRef = useRef<HTMLInputElement>(null)
+
+  // Paso 4 — Resultado
+  const [wizResultado,   setWizResultado]   = useState<SimResultado | null>(null)
+  const [wizSimCargando, setWizSimCargando] = useState(false)
+  const [wizSimError,    setWizSimError]    = useState<string | null>(null)
 
   const datosConSpread = useMemo(() => {
     return datos.map((d) => ({
@@ -663,177 +674,90 @@ function App() {
     return () => controller.abort()
   }, [tabActiva])
 
-  // Auto-fill del período de PB cuando se elige un escenario ENSO
+  // Sync ENSO → fechas PB
   useEffect(() => {
-    if (simFuentePB !== 'enso') return
-    const enso = ENSO_OPCIONES.find((e) => e.key === simEnso)
-    if (enso) {
-      setPbDesde(enso.inicio)
-      setPbHasta(enso.fin)
+    if (wizFuentePB !== 'enso') return
+    const enso = ENSO_COMPLETO.find(e => e.key === wizEnsoKey)
+    if (enso) { setWizPBDesde(enso.pb_desde); setWizPBHasta(enso.pb_hasta) }
+  }, [wizFuentePB, wizEnsoKey])
+
+  async function wizCargarPosicion() {
+    setWizPortfolioCargando(true); setWizPortfolioError(null)
+    try {
+      const resp = await fetch(`${API_PORTFOLIO}?fecha_inicio=${wizPeriodoInicio}&fecha_fin=${wizPeriodoFin}`)
+      if (!resp.ok) { const c = await resp.json().catch(() => null); throw new Error(c?.detail ?? `Error ${resp.status}`) }
+      const json = await resp.json()
+      const candidatos = Array.isArray(json?.datos) ? json.datos : Array.isArray(json) ? json : []
+      setWizPortfolioDatos(candidatos.map(parseFilaPortfolio).filter(Boolean) as FilaPortfolio[])
+    } catch (err) { setWizPortfolioError(err instanceof Error ? err.message : 'Error'); setWizPortfolioDatos([]) }
+    finally { setWizPortfolioCargando(false) }
+  }
+
+  async function wizCargarPB() {
+    if (wizFuentePB === 'historico') {
+      const d1 = new Date(wizPBDesde), d2 = new Date(wizPBHasta)
+      const meses = (d2.getFullYear() - d1.getFullYear()) * 12 + (d2.getMonth() - d1.getMonth()) + 1
+      if (meses > 36) { setWizPBError(`El rango tiene ${meses} meses. Máximo 36 meses.`); return }
+      if (meses < 1) { setWizPBError('El período debe tener al menos 1 mes.'); return }
     }
-  }, [simFuentePB, simEnso])
-
-  function addBloque() {
-    if (simBloques.length >= 3) return
-    setSimBloques((prev) => [...prev, { horaInicio: 18, horaFin: 22, mwhMes: 500 }])
+    setWizPBCargando(true); setWizPBError(null)
+    try {
+      const resp = await fetch(`${API_BASE}?precio_contrato=0&fecha_inicio=${wizPBDesde}&fecha_fin=${wizPBHasta}`)
+      if (!resp.ok) { const c = await resp.json().catch(() => null); throw new Error(c?.detail ?? `Error ${resp.status}`) }
+      const json = await resp.json()
+      setWizPBDatos(Array.isArray(json?.datos) ? json.datos : [])
+    } catch (err) { setWizPBError(err instanceof Error ? err.message : 'Error'); setWizPBDatos([]) }
+    finally { setWizPBCargando(false) }
   }
 
-  function removeBloque(idx: number) {
-    setSimBloques((prev) => prev.filter((_, i) => i !== idx))
+  async function wizSimular() {
+    setWizSimCargando(true); setWizSimError(null)
+    type SimBody = { tipo: string; contraparte: string; precio_cop_kwh: number; pb_desde: string; pb_hasta: string; contrato_inicio: string; contrato_fin: string; tipo_mercado: string; perfil_horario: string; energia_mensual_mwh?: number; bloques?: { hora_ini: number; hora_fin: number; mwh_mes: number }[]; perfil_excel_12x24?: number[][] }
+    const body: SimBody = { tipo: wizSimTipo, contraparte: wizSimContraparte, precio_cop_kwh: wizSimPrecio, pb_desde: wizPBDesde, pb_hasta: wizPBHasta, contrato_inicio: wizContratoInicio, contrato_fin: wizContratoFin, tipo_mercado: wizSimTipoMercado, perfil_horario: wizSimPerfilTipo === 'excel' ? 'excel' : wizSimPerfilTipo }
+    if (wizSimPerfilTipo === 'plano' || wizSimPerfilTipo === 'solar') body.energia_mensual_mwh = wizSimEnergiaMwh
+    else if (wizSimPerfilTipo === 'bloques') body.bloques = wizSimBloques.map(b => ({ hora_ini: b.horaInicio, hora_fin: b.horaFin, mwh_mes: b.mwhMes }))
+    else if (wizSimPerfilTipo === 'excel' && wizSimExcel12x24) body.perfil_excel_12x24 = wizSimExcel12x24
+    try {
+      const resp = await fetch(API_SIMULATE, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      if (!resp.ok) { const c = await resp.json().catch(() => null); throw new Error(c?.detail ?? `Error ${resp.status}`) }
+      const json: SimResultado = await resp.json()
+      setWizResultado(json); setWizPaso(4)
+    } catch (err) { setWizSimError(err instanceof Error ? err.message : 'Error al simular'); setWizResultado(null) }
+    finally { setWizSimCargando(false) }
   }
 
-  function updateBloque(idx: number, campo: keyof SimBloque, valor: number) {
-    setSimBloques((prev) =>
-      prev.map((b, i) =>
-        i === idx
-          ? {
-              ...b,
-              [campo]: valor,
-              // Ensure horaFin >= horaInicio
-              ...(campo === 'horaInicio' && valor > b.horaFin
-                ? { horaFin: valor }
-                : {}),
-            }
-          : b,
-      ),
-    )
+  function wizReset() { setWizPaso(1); setWizPortfolioDatos([]); setWizPortfolioError(null); setWizPBDatos([]); setWizPBError(null); setWizResultado(null); setWizSimError(null); setWizSimExcel12x24(null); setWizSimExcelNombre('') }
+
+  function wizDescargarJSON() {
+    if (!wizResultado) return
+    const payload = { periodo: { inicio: wizPeriodoInicio, fin: wizPeriodoFin }, escenario_pb: { fuente: wizFuentePB, desde: wizPBDesde, hasta: wizPBHasta }, contrato: { tipo: wizSimTipo, contraparte: wizSimContraparte, precio_cop_kwh: wizSimPrecio, tipo_mercado: wizSimTipoMercado, perfil: wizSimPerfilTipo, inicio: wizContratoInicio, fin: wizContratoFin }, resultado: wizResultado }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = `simulacion_${new Date().toISOString().slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(url)
   }
 
-  function handleExcelUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setSimExcelNombre(file.name)
+  function wizHandleExcelUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]; if (!file) return
+    setWizSimExcelNombre(file.name)
     const reader = new FileReader()
     reader.onload = (evt) => {
       try {
         const wb = XLSX.read(evt.target?.result, { type: 'binary' })
         const ws = wb.Sheets[wb.SheetNames[0]]
         const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1 }) as unknown[][]
-        // Skip header row if first cell is text (e.g. "Mes", "H1", etc.)
-        const dataRows = rows.filter(
-          (r) => Array.isArray(r) && r.length >= 24 && typeof r[0] === 'number',
-        )
-        if (dataRows.length < 1) {
-          setSimError(
-            'El archivo no tiene filas numéricas válidas. Asegúrate de que filas = meses y columnas = H1..H24 con valores en kWh.',
-          )
-          return
-        }
-        const matrix: number[][] = dataRows.slice(0, 12).map((row) =>
-          Array.from({ length: 24 }, (_, i) => parseFloat(String((row as unknown[])[i] ?? 0)) || 0),
-        )
+        const dataRows = rows.filter(r => Array.isArray(r) && r.length >= 24 && typeof r[0] === 'number')
+        if (dataRows.length < 1) { setWizSimError('Archivo sin filas numéricas válidas.'); return }
+        const matrix: number[][] = dataRows.slice(0, 12).map(row => Array.from({ length: 24 }, (_, i) => parseFloat(String((row as unknown[])[i] ?? 0)) || 0))
         while (matrix.length < 12) matrix.push([...matrix[matrix.length - 1]])
-        setSimExcel12x24(matrix)
-        setSimError(null)
-      } catch {
-        setSimError('Error al leer el archivo Excel. Verifica el formato.')
-      }
+        setWizSimExcel12x24(matrix); setWizSimError(null)
+      } catch { setWizSimError('Error al leer el archivo Excel.') }
     }
-    reader.readAsBinaryString(file)
-    // Reset input so same file can be re-uploaded
-    e.target.value = ''
+    reader.readAsBinaryString(file); e.target.value = ''
   }
-
-  async function cargarSimulacion() {
-    // ── Validate date ranges ──────────────────────────────────────────────────
-    const diffMesesPB = (() => {
-      const d1 = new Date(pbDesde)
-      const d2 = new Date(pbHasta)
-      return (d2.getFullYear() - d1.getFullYear()) * 12 + (d2.getMonth() - d1.getMonth()) + 1
-    })()
-    if (diffMesesPB < 1) {
-      setSimError('El período de PB histórico debe tener al menos 1 mes.')
-      return
-    }
-    if (diffMesesPB > 36) {
-      setSimError(
-        `El período de PB histórico tiene ${diffMesesPB} meses. ` +
-        'Usa un rango de máximo 36 meses para evitar timeout — ' +
-        'o selecciona un escenario ENSO predefinido.',
-      )
-      return
-    }
-
-    // ── Validate profile configuration ───────────────────────────────────────
-    if (simPerfilTipo === 'excel' && !simExcel12x24) {
-      setSimError('Carga un archivo Excel antes de simular.')
-      return
-    }
-    if (
-      (simPerfilTipo === 'plano' || simPerfilTipo === 'solar') &&
-      simEnergiaMwh <= 0
-    ) {
-      setSimError('Ingresa una energía mensual mayor que 0.')
-      return
-    }
-
-    try {
-      setSimCargando(true)
-      setSimError(null)
-
-      // ── Build profile fields for the API ───────────────────────────────────
-      // The backend handles all profile logic; the frontend just ships the
-      // raw inputs (bloques list, excel matrix, energy amount).
-      type SimBody = {
-        tipo: string
-        contraparte: string
-        precio_cop_kwh: number
-        pb_desde: string
-        pb_hasta: string
-        contrato_inicio: string
-        contrato_fin: string
-        tipo_mercado: string
-        perfil_horario: string
-        energia_mensual_mwh?: number
-        bloques?: { hora_ini: number; hora_fin: number; mwh_mes: number }[]
-        perfil_excel_12x24?: number[][]
-      }
-
-      const body: SimBody = {
-        tipo: simTipo,
-        contraparte: simContraparte,
-        precio_cop_kwh: simPrecio,
-        pb_desde: pbDesde,
-        pb_hasta: pbHasta,
-        contrato_inicio: contratoInicio,
-        contrato_fin: contratoFin,
-        tipo_mercado: simTipoMercado,
-        perfil_horario: simPerfilTipo === 'excel' ? 'excel' : simPerfilTipo,
-      }
-
-      if (simPerfilTipo === 'plano' || simPerfilTipo === 'solar') {
-        body.energia_mensual_mwh = simEnergiaMwh
-      } else if (simPerfilTipo === 'bloques') {
-        body.bloques = simBloques.map((b) => ({
-          hora_ini: b.horaInicio,
-          hora_fin: b.horaFin,
-          mwh_mes: b.mwhMes,
-        }))
-      } else if (simPerfilTipo === 'excel' && simExcel12x24) {
-        body.perfil_excel_12x24 = simExcel12x24
-      }
-
-      const respuesta = await fetch(API_SIMULATE, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      if (!respuesta.ok) {
-        const cuerpo = await respuesta.json().catch(() => null)
-        throw new Error(
-          typeof cuerpo?.detail === 'string'
-            ? cuerpo.detail
-            : `Error ${respuesta.status}`,
-        )
-      }
-      const json: SimResultado = await respuesta.json()
-      setSimResultado(json)
-    } catch (err) {
-      setSimError(err instanceof Error ? err.message : 'Error al simular')
-      setSimResultado(null)
-    } finally {
-      setSimCargando(false)
-    }
+  function wizAddBloque() { if (wizSimBloques.length >= 3) return; setWizSimBloques(prev => [...prev, { horaInicio: 18, horaFin: 22, mwhMes: 500 }]) }
+  function wizRemoveBloque(idx: number) { setWizSimBloques(prev => prev.filter((_, i) => i !== idx)) }
+  function wizUpdateBloque(idx: number, campo: keyof SimBloque, valor: number) {
+    setWizSimBloques(prev => prev.map((b, i) => i === idx ? { ...b, [campo]: valor, ...(campo === 'horaInicio' && valor > b.horaFin ? { horaFin: valor } : {}) } : b))
   }
 
   function toggleMesComparativo(mes: string) {
@@ -843,6 +767,53 @@ function App() {
       return [...prev, mes].sort()
     })
   }
+
+  const wizResumenMensual = useMemo(() => {
+    if (wizPortfolioDatos.length === 0) return []
+    const mapa = new Map<string, FilaPortfolio[]>()
+    for (const f of wizPortfolioDatos) { const mes = normalizarFecha(f.fecha).slice(0, 7); const arr = mapa.get(mes) ?? []; arr.push(f); mapa.set(mes, arr) }
+    return [...mapa.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([mes, filas]) => {
+      const compraRmwh  = filas.reduce((s, f) => s + f.compra_r,  0) / 1000
+      const compraNrmwh = filas.reduce((s, f) => s + f.compra_nr, 0) / 1000
+      const ventaMwh    = filas.reduce((s, f) => s + f.venta,     0) / 1000
+      const posNetaMwh  = filas.reduce((s, f) => s + f.posicion_neta, 0) / 1000
+      return { mes, compraRmwh, compraNrmwh, ventaMwh, posNetaMwh,
+        copCompraR:  compraRmwh  * 1000 * PRECIO_MOCK_COMPRA_R  / 1_000_000,
+        copCompraNr: compraNrmwh * 1000 * PRECIO_MOCK_COMPRA_NR / 1_000_000,
+        copVenta:    ventaMwh    * 1000 * PRECIO_MOCK_VENTA      / 1_000_000,
+        tipoPos: posNetaMwh < 0 ? 'Vendedor' as const : 'Comprador' as const }
+    })
+  }, [wizPortfolioDatos])
+
+  const wizPBPromedioGlobal = useMemo(() => {
+    if (wizPBDatos.length === 0) return null
+    return wizPBDatos.reduce((s, d) => s + d.precio_bolsa, 0) / wizPBDatos.length
+  }, [wizPBDatos])
+
+  const wizPBResumenMensual = useMemo(() => {
+    if (wizPBDatos.length === 0) return []
+    const mapaPB = new Map<string, number[]>()
+    for (const d of wizPBDatos) { const mes = normalizarFecha(d.fecha).slice(0, 7); const arr = mapaPB.get(mes) ?? []; arr.push(d.precio_bolsa); mapaPB.set(mes, arr) }
+    const invAnio = new Date(wizPeriodoInicio).getFullYear()
+    const mapaPort = new Map<string, number>()
+    for (const m of wizResumenMensual) mapaPort.set(m.mes, m.posNetaMwh)
+    return [...mapaPB.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([pbMes, pbs]) => {
+      const pbProm = pbs.reduce((s, v) => s + v, 0) / pbs.length
+      const portMes = `${invAnio}-${pbMes.slice(5)}`
+      const posNetaMwh = mapaPort.get(portMes) ?? 0
+      return { mes: pbMes, pbProm, posNetaMwh, transaccionMcop: posNetaMwh * 1000 * pbProm / 1_000_000, spreadVsPB: PRECIO_MOCK_COMPRA_R - pbProm }
+    })
+  }, [wizPBDatos, wizResumenMensual, wizPeriodoInicio])
+
+  const wizPBPerfilHorario = useMemo(() => {
+    if (wizPBDatos.length === 0) return []
+    return Array.from({ length: 24 }, (_, i) => {
+      const hora = i + 1
+      const pbs = wizPBDatos.filter(d => d.hora === hora).map(d => d.precio_bolsa)
+      if (pbs.length === 0) return { hora, p10: null as number | null, p50: null as number | null, p90: null as number | null, promedio: null as number | null }
+      return { hora, p10: percentil(pbs, 10), p50: percentil(pbs, 50), p90: percentil(pbs, 90), promedio: pbs.reduce((s, v) => s + v, 0) / pbs.length }
+    })
+  }, [wizPBDatos])
 
   const datosPorHora = useMemo(
     () =>
@@ -2138,580 +2109,512 @@ function App() {
           </>
         )}
 
-        {/* ══════════════════════════════════════════════════════════════════
-            TAB: SIMULADOR  (redesign v2)
-        ══════════════════════════════════════════════════════════════════ */}
         {tabActiva === 'simulador' && (
           <>
-            {/* Header */}
             <div>
               <h2 className="text-xl font-bold text-gray-100">Simulador</h2>
-              <p className="mt-0.5 text-sm text-gray-500">
-                Evalúa el impacto de un nuevo contrato sobre el portafolio Olibia
-              </p>
+              <p className="mt-0.5 text-sm text-gray-500">Evalúa el impacto de un nuevo contrato — sigue los 4 pasos</p>
             </div>
 
-            {/* ── Two-column layout: form (left) + results (right) ─────── */}
-            <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
+            <WizardProgressBar pasoActual={wizPaso} />
 
-              {/* ═══════════════════════════════════════════════════════════
-                  LEFT PANEL — form
-              ═══════════════════════════════════════════════════════════ */}
-              <div className="space-y-4 lg:col-span-2">
+            {/* ══ PASO 1 — Período ══ */}
+            {wizPaso === 1 && (
+              <div className="space-y-5">
+                <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
+                  <p className="mb-4 text-xs font-semibold uppercase tracking-widest text-emerald-500">Paso 1 — ¿Qué período quieres simular?</p>
+                  <div className="flex flex-wrap items-end gap-4">
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-xs text-gray-400">Inicio del período</label>
+                      <input type="date" min="2026-01-01" value={wizPeriodoInicio} onChange={e => setWizPeriodoInicio(e.target.value)}
+                        className="rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-sm text-gray-100 outline-none [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30" />
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-xs text-gray-400">Fin del período</label>
+                      <input type="date" value={wizPeriodoFin} onChange={e => setWizPeriodoFin(e.target.value)}
+                        className="rounded-lg border border-gray-700 bg-gray-950 px-4 py-2.5 text-sm text-gray-100 outline-none [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30" />
+                    </div>
+                    <button type="button" onClick={wizCargarPosicion} disabled={wizPortfolioCargando}
+                      className="rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed">
+                      {wizPortfolioCargando ? <span className="flex items-center gap-2"><span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />Cargando…</span> : '📊 Ver posición actual'}
+                    </button>
+                  </div>
+                  {wizPortfolioError && <p className="mt-3 text-sm text-red-400">{wizPortfolioError}</p>}
+                </section>
 
-                {/* ── PARTE A: Escenario de PB ─────────────────────────── */}
-                <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
-                  <p className="mb-4 text-xs font-semibold uppercase tracking-widest text-emerald-500">
-                    A — Escenario de precio de bolsa
-                  </p>
+                {wizResumenMensual.length > 0 && (() => {
+                  const totR   = wizResumenMensual.reduce((s, m) => s + m.compraRmwh, 0)
+                  const totNr  = wizResumenMensual.reduce((s, m) => s + m.compraNrmwh, 0)
+                  const totV   = wizResumenMensual.reduce((s, m) => s + m.ventaMwh, 0)
+                  const totP   = wizResumenMensual.reduce((s, m) => s + m.posNetaMwh, 0)
+                  const totCR  = wizResumenMensual.reduce((s, m) => s + m.copCompraR, 0)
+                  const totCNr = wizResumenMensual.reduce((s, m) => s + m.copCompraNr, 0)
+                  const totCV  = wizResumenMensual.reduce((s, m) => s + m.copVenta, 0)
+                  const nVend  = wizResumenMensual.filter(m => m.posNetaMwh < 0).length
+                  return (
+                    <>
+                      <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-5 py-3">
+                        <p className="text-xs font-semibold uppercase tracking-widest text-gray-400">Capítulo 1 — Posición actual en el período</p>
+                        <p className="mt-0.5 text-xs text-gray-600">Precios mock: Compra R {PRECIO_MOCK_COMPRA_R} · Compra NR {PRECIO_MOCK_COMPRA_NR} · Venta {PRECIO_MOCK_VENTA} COP/kWh</p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        <MetricCard label="Compra total" value={`${formatMiles(totR + totNr, 0)} MWh`} subValue={`${formatMiles(totCR + totCNr, 1)} M COP`} accent="text-sky-400" />
+                        <MetricCard label="Venta total"  value={`${formatMiles(totV, 0)} MWh`} subValue={`${formatMiles(totCV, 1)} M COP`} accent="text-rose-400" />
+                        <MetricCard label="Posición neta total" value={`${formatMiles(totP, 0)} MWh`} accent={totP <= 0 ? 'text-emerald-400' : 'text-red-400'} />
+                        <MetricCard label="Tipo dominante" value={`${nVend} de ${wizResumenMensual.length} meses vendedor`} accent="text-amber-400" />
+                      </div>
+                      <TablaAnalisis
+                        encabezados={['Mes','Compra R (MWh)','Compra NR (MWh)','Venta (MWh)','Pos. Neta (MWh)','Tipo']}
+                        filas={<>
+                          {wizResumenMensual.map(m => (
+                            <tr key={m.mes} className="transition-colors hover:bg-gray-800/40">
+                              <td className="px-4 py-2.5 font-medium text-gray-200">{formatMes(m.mes)}</td>
+                              <td className="px-4 py-2.5 text-right tabular-nums text-sky-300">{formatMiles(m.compraRmwh, 0)}</td>
+                              <td className="px-4 py-2.5 text-right tabular-nums text-sky-300">{formatMiles(m.compraNrmwh, 0)}</td>
+                              <td className="px-4 py-2.5 text-right tabular-nums text-rose-300">{formatMiles(m.ventaMwh, 0)}</td>
+                              <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${m.posNetaMwh <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{formatMiles(m.posNetaMwh, 0)}</td>
+                              <td className={`px-4 py-2.5 text-right text-xs font-semibold ${m.tipoPos === 'Vendedor' ? 'text-emerald-400' : 'text-red-400'}`}>{m.tipoPos}</td>
+                            </tr>
+                          ))}
+                          <tr className="border-t-2 border-gray-700 bg-gray-800/60">
+                            <td className="px-4 py-2.5 text-xs font-bold uppercase tracking-wider text-gray-400">TOTAL</td>
+                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-sky-300">{formatMiles(totR, 0)}</td>
+                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-sky-300">{formatMiles(totNr, 0)}</td>
+                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-rose-300">{formatMiles(totV, 0)}</td>
+                            <td className={`px-4 py-2.5 text-right font-bold tabular-nums ${totP <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{formatMiles(totP, 0)}</td>
+                            <td />
+                          </tr>
+                        </>}
+                      />
+                      <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+                        <p className="mb-4 text-sm font-medium text-gray-400">Compra vs Venta por mes (MWh)</p>
+                        <div className="h-64">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={wizResumenMensual.map(m => ({ mes: m.mes, compra: Math.round(m.compraRmwh + m.compraNrmwh), venta: Math.round(m.ventaMwh) }))} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+                              <CartesianGrid stroke="#374151" strokeDasharray="3 3" />
+                              <XAxis dataKey="mes" stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 11 }} tickFormatter={v => formatMes(String(v)).slice(0,3)} />
+                              <YAxis stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 11 }} />
+                              <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '8px', color: '#f3f4f6' }} labelFormatter={v => formatMes(String(v))} formatter={(v, n) => [`${formatMiles(Number(v), 0)} MWh`, n]} />
+                              <Legend wrapperStyle={{ color: '#9ca3af', paddingTop: 8 }} />
+                              <Bar dataKey="compra" name="Compra" fill="#3b82f6" radius={[3,3,0,0]} />
+                              <Bar dataKey="venta"  name="Venta"  fill="#ef4444" radius={[3,3,0,0]} />
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </div>
+                      <div className="flex justify-end">
+                        <button type="button" onClick={() => setWizPaso(2)} className="rounded-lg bg-emerald-600 px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500">
+                          Siguiente → Escenario PB
+                        </button>
+                      </div>
+                    </>
+                  )
+                })()}
+              </div>
+            )}
 
-                  {/* Toggle Histórico / ENSO */}
-                  <div className="mb-4 inline-flex w-full rounded-lg border border-gray-700 bg-gray-950 p-1">
-                    {(['historico', 'enso'] as SimFuentePB[]).map((f) => (
-                      <button
-                        key={f}
-                        type="button"
-                        onClick={() => setSimFuentePB(f)}
-                        className={`flex-1 rounded-md py-2 text-sm font-semibold transition ${
-                          simFuentePB === f
-                            ? 'bg-emerald-600 text-white shadow-sm'
-                            : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
-                        }`}
-                      >
-                        {f === 'historico' ? '📅 PB Histórico' : '🌡 Fenómeno ENSO'}
+            {/* ══ PASO 2 — Escenario PB ══ */}
+            {wizPaso === 2 && (
+              <div className="space-y-5">
+                <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
+                  <p className="mb-4 text-xs font-semibold uppercase tracking-widest text-emerald-500">Paso 2 — ¿Con qué precio de bolsa vas a analizar?</p>
+                  <div className="mb-5 inline-flex w-full rounded-lg border border-gray-700 bg-gray-950 p-1">
+                    {(['historico', 'enso', 'proyectado'] as WizFuentePB[]).map(f => (
+                      <button key={f} type="button" onClick={() => setWizFuentePB(f)}
+                        className={`flex-1 rounded-md py-2 text-xs font-semibold transition ${wizFuentePB === f ? 'bg-emerald-600 text-white' : 'text-gray-400 hover:bg-gray-800'}`}>
+                        {f === 'historico' ? '📅 PB Histórico' : f === 'enso' ? '🌡 Fenómeno ENSO' : '📈 PB Proyectado'}
                       </button>
                     ))}
                   </div>
 
-                  {simFuentePB === 'historico' ? (
+                  {wizFuentePB === 'historico' && (
                     <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="mb-1 block text-xs text-gray-500">Desde</label>
-                        <input
-                          type="date"
-                          min="2010-01-01"
-                          value={pbDesde}
-                          onChange={(e) => setPbDesde(e.target.value)}
-                          className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
-                        />
+                      <div><label className="mb-1 block text-xs text-gray-500">Desde</label>
+                        <input type="date" min="2010-01-01" value={wizPBDesde} onChange={e => setWizPBDesde(e.target.value)}
+                          className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none [color-scheme:dark] focus:border-emerald-500/50" />
                       </div>
-                      <div>
-                        <label className="mb-1 block text-xs text-gray-500">Hasta</label>
-                        <input
-                          type="date"
-                          value={pbHasta}
-                          onChange={(e) => setPbHasta(e.target.value)}
-                          className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
-                        />
+                      <div><label className="mb-1 block text-xs text-gray-500">Hasta</label>
+                        <input type="date" value={wizPBHasta} onChange={e => setWizPBHasta(e.target.value)}
+                          className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none [color-scheme:dark] focus:border-emerald-500/50" />
                       </div>
-                    </div>
-                  ) : (
-                    <div>
-                      <label className="mb-1 block text-xs text-gray-500">
-                        Período de referencia
-                      </label>
-                      <select
-                        value={simEnso}
-                        onChange={(e) => setSimEnso(e.target.value)}
-                        className={CLASE_SELECT + ' w-full'}
-                      >
-                        {ENSO_OPCIONES.map((e) => (
-                          <option key={e.key} value={e.key}>
-                            {e.label}
-                          </option>
-                        ))}
-                      </select>
-                      {(() => {
-                        const enso = ENSO_OPCIONES.find((e) => e.key === simEnso)
-                        return enso ? (
-                          <p className="mt-2 text-xs text-gray-600">
-                            📌 {enso.inicio} → {enso.fin}
-                          </p>
-                        ) : null
-                      })()}
+                      <p className="col-span-2 text-xs text-gray-600">Máximo 36 meses para evitar timeout.</p>
                     </div>
                   )}
+
+                  {wizFuentePB === 'enso' && (
+                    <div>
+                      <div className="overflow-x-auto rounded-lg border border-gray-700">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="border-b border-gray-700 bg-gray-900/60 text-xs uppercase tracking-wider text-gray-500">
+                              <th className="px-3 py-2.5 text-left">Período</th>
+                              <th className="px-3 py-2.5 text-left">Fenómeno</th>
+                              <th className="px-3 py-2.5 text-left">Intensidad</th>
+                              <th className="px-3 py-2.5 text-center">Seleccionar</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-800/60">
+                            {ENSO_COMPLETO.map(e => {
+                              const sel = wizEnsoKey === e.key
+                              const clr = e.fenomeno === 'nino' ? 'text-orange-400' : e.fenomeno === 'nina' ? 'text-blue-400' : 'text-gray-400'
+                              const bgSel = sel ? (e.fenomeno === 'nino' ? 'bg-orange-500/10' : e.fenomeno === 'nina' ? 'bg-blue-500/10' : 'bg-gray-500/10') : ''
+                              return (
+                                <tr key={e.key} onClick={() => setWizEnsoKey(e.key as EnsoKey)} className={`cursor-pointer transition-colors hover:bg-gray-800/40 ${bgSel}`}>
+                                  <td className={`px-3 py-2.5 font-medium ${clr}`}>{e.label}</td>
+                                  <td className={`px-3 py-2.5 text-xs font-semibold ${clr}`}>{e.fenomeno === 'nino' ? '🔴 El Niño' : e.fenomeno === 'nina' ? '🔵 La Niña' : '⚪ Neutral'}</td>
+                                  <td className="px-3 py-2.5 text-xs text-gray-400">{e.intensidad}</td>
+                                  <td className="px-3 py-2.5 text-center"><input type="radio" checked={sel} onChange={() => setWizEnsoKey(e.key as EnsoKey)} className="h-4 w-4 accent-emerald-500" /></td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      {(() => { const enso = ENSO_COMPLETO.find(e => e.key === wizEnsoKey); return enso ? (<p className="mt-3 text-xs text-gray-500">📌 Usando PB histórico del período <span className="font-semibold text-gray-300">{enso.pb_desde} → {enso.pb_hasta}</span> como proxy de escenario <span className="font-semibold text-gray-300">{enso.label}</span></p>) : null })()}
+                    </div>
+                  )}
+
+                  {wizFuentePB === 'proyectado' && (
+                    <div className="space-y-3">
+                      <p className="text-xs text-amber-500">⚠ Por ahora se usará PB histórico como proxy proyectado. Configura el rango base:</p>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div><label className="mb-1 block text-xs text-gray-500">Desde</label>
+                          <input type="date" min="2010-01-01" value={wizPBDesde} onChange={e => setWizPBDesde(e.target.value)}
+                            className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none [color-scheme:dark] focus:border-emerald-500/50" />
+                        </div>
+                        <div><label className="mb-1 block text-xs text-gray-500">Hasta</label>
+                          <input type="date" value={wizPBHasta} onChange={e => setWizPBHasta(e.target.value)}
+                            className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none [color-scheme:dark] focus:border-emerald-500/50" />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="mt-5 flex items-center gap-3">
+                    <button type="button" onClick={wizCargarPB} disabled={wizPBCargando}
+                      className="rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed">
+                      {wizPBCargando ? <span className="flex items-center gap-2"><span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />Calculando…</span> : '⚡ Calcular escenario bolsa'}
+                    </button>
+                    {wizPBError && <p className="text-sm text-red-400">{wizPBError}</p>}
+                  </div>
                 </section>
 
-                {/* ── PARTE C: Nuevo contrato ──────────────────────────── */}
-                <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
-                  <p className="mb-4 text-xs font-semibold uppercase tracking-widest text-blue-400">
-                    C — Nuevo contrato
-                  </p>
+                {wizPBResumenMensual.length > 0 && wizPBPromedioGlobal !== null && (() => {
+                  const spread = PRECIO_MOCK_COMPRA_R - wizPBPromedioGlobal
+                  const semColor = spread > 5 ? 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10' : spread > -5 ? 'text-amber-400 border-amber-500/40 bg-amber-500/10' : 'text-red-400 border-red-500/40 bg-red-500/10'
+                  const semIcon  = spread > 5 ? '✓' : spread > -5 ? '⚠' : '✗'
+                  const semTexto = spread > 5
+                    ? `Spread favorable: contratos mock ${PRECIO_MOCK_COMPRA_R} COP/kWh vs PB promedio ${formatNumero(wizPBPromedioGlobal)} COP/kWh (+${formatNumero(spread)} COP/kWh).`
+                    : spread > -5 ? `Spread marginal (${formatNumero(spread, 1)} COP/kWh). Evalúa con más detalle.`
+                    : `Spread negativo: PB promedio ${formatNumero(wizPBPromedioGlobal)} COP/kWh supera contratos actuales.`
+                  return (
+                    <>
+                      <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-5 py-3">
+                        <p className="text-xs font-semibold uppercase tracking-widest text-gray-400">Capítulo 2 — Costo / Ingreso en bolsa con este escenario</p>
+                      </div>
+                      <div className={`border px-5 py-3 ${semColor}`}>
+                        <div className="flex items-center gap-3"><span className="text-xl font-bold">{semIcon}</span><p className="text-sm">{semTexto}</p></div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        <MetricCard label="PB promedio escenario" value={`${formatNumero(wizPBPromedioGlobal)} COP/kWh`} accent="text-white" />
+                        <MetricCard label="PPP contratos (mock)" value={`${PRECIO_MOCK_COMPRA_R} COP/kWh`} accent="text-amber-400" />
+                        <MetricCard label="Spread promedio" value={`${spread >= 0 ? '+' : ''}${formatNumero(spread)} COP/kWh`} accent={spread >= 0 ? 'text-emerald-400' : 'text-red-400'} />
+                        <MetricCard label="Transacción bolsa total" value={`${formatMiles(wizPBResumenMensual.reduce((s, m) => s + m.transaccionMcop, 0), 2)} M COP`} accent={wizPBResumenMensual.reduce((s, m) => s + m.transaccionMcop, 0) <= 0 ? 'text-emerald-400' : 'text-red-400'} />
+                      </div>
+                      <TablaAnalisis
+                        encabezados={['Mes','PB Promedio (COP/kWh)','Posición Neta (MWh)','Trans. Bolsa (M COP)','Spread Contratos vs PB']}
+                        filas={wizPBResumenMensual.map(m => (
+                          <tr key={m.mes} className="transition-colors hover:bg-gray-800/40">
+                            <td className="px-4 py-2.5 font-medium text-gray-200">{formatMes(m.mes)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums text-gray-200">{formatNumero(m.pbProm)}</td>
+                            <td className={`px-4 py-2.5 text-right tabular-nums ${m.posNetaMwh <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{formatMiles(m.posNetaMwh, 0)}</td>
+                            <td className={`px-4 py-2.5 text-right tabular-nums ${m.transaccionMcop <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{formatMiles(m.transaccionMcop, 2)}</td>
+                            <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${m.spreadVsPB >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{m.spreadVsPB >= 0 ? '+' : ''}{formatNumero(m.spreadVsPB)}</td>
+                          </tr>
+                        ))}
+                      />
+                      <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+                        <p className="mb-1 text-sm font-medium text-gray-400">PB hora a hora — P10 / Promedio / P90</p>
+                        <div className="h-64">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={wizPBPerfilHorario} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+                              <CartesianGrid stroke="#374151" strokeDasharray="3 3" />
+                              <XAxis dataKey="hora" type="number" domain={[1,24]} ticks={Array.from({length:24},(_,i)=>i+1)} stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 11 }} />
+                              <YAxis stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 11 }} />
+                              <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '8px', color: '#f3f4f6' }} labelFormatter={h => `Hora ${h}`} formatter={(v, n) => [v != null ? `${formatNumero(Number(v))} COP/kWh` : '—', n]} />
+                              <Legend wrapperStyle={{ color: '#9ca3af', paddingTop: 8 }} />
+                              <Line type="monotone" dataKey="p10"      name="P10"      stroke="#6b7280" strokeWidth={1} strokeDasharray="4 4" dot={false} connectNulls />
+                              <Line type="monotone" dataKey="promedio" name="Promedio" stroke="#3b82f6" strokeWidth={2.5} dot={false} connectNulls />
+                              <Line type="monotone" dataKey="p90"      name="P90"      stroke="#6b7280" strokeWidth={1} strokeDasharray="4 4" dot={false} connectNulls />
+                            </LineChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </div>
+                      <div className="flex justify-between">
+                        <button type="button" onClick={() => setWizPaso(1)} className="rounded-lg border border-gray-700 px-5 py-2.5 text-sm font-semibold text-gray-300 transition hover:bg-gray-800">← Período</button>
+                        <button type="button" onClick={() => setWizPaso(3)} className="rounded-lg bg-emerald-600 px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-500">Siguiente → Nuevo contrato</button>
+                      </div>
+                    </>
+                  )
+                })()}
+                {wizPBResumenMensual.length === 0 && (
+                  <div className="flex justify-start">
+                    <button type="button" onClick={() => setWizPaso(1)} className="rounded-lg border border-gray-700 px-5 py-2.5 text-sm font-semibold text-gray-300 transition hover:bg-gray-800">← Período</button>
+                  </div>
+                )}
+              </div>
+            )}
 
-                  {/* Tipo Compra / Venta */}
+            {/* ══ PASO 3 — Nuevo contrato ══ */}
+            {wizPaso === 3 && (
+              <div className="grid grid-cols-1 gap-5 lg:grid-cols-5">
+                <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-5 lg:col-span-3">
+                  <p className="mb-4 text-xs font-semibold uppercase tracking-widest text-blue-400">Paso 3 — ¿Qué contrato quieres simular?</p>
+
                   <div className="mb-4">
-                    <label className="mb-1.5 block text-xs text-gray-500">
-                      Tipo de operación
-                    </label>
+                    <label className="mb-1.5 block text-xs text-gray-500">Tipo de operación</label>
                     <div className="inline-flex w-full rounded-lg border border-gray-700 bg-gray-950 p-1">
-                      {(['compra', 'venta'] as SimTipo[]).map((t) => (
-                        <button
-                          key={t}
-                          type="button"
-                          onClick={() => setSimTipo(t)}
-                          className={`flex-1 rounded-md py-2 text-sm font-semibold capitalize transition ${
-                            simTipo === t
-                              ? t === 'compra'
-                                ? 'bg-blue-600 text-white shadow-sm'
-                                : 'bg-rose-600 text-white shadow-sm'
-                              : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
-                          }`}
-                        >
+                      {(['compra','venta'] as SimTipo[]).map(t => (
+                        <button key={t} type="button" onClick={() => setWizSimTipo(t)}
+                          className={`flex-1 rounded-md py-2 text-sm font-semibold capitalize transition ${wizSimTipo === t ? (t === 'compra' ? 'bg-blue-600 text-white' : 'bg-rose-600 text-white') : 'text-gray-400 hover:bg-gray-800'}`}>
                           {t === 'compra' ? '↓ Compra' : '↑ Venta'}
                         </button>
                       ))}
                     </div>
                   </div>
 
-                  {/* Contraparte + Precio */}
                   <div className="mb-3">
                     <label className="mb-1 block text-xs text-gray-500">Contraparte</label>
-                    <input
-                      type="text"
-                      placeholder="Nombre de la contraparte"
-                      value={simContraparte}
-                      onChange={(e) => setSimContraparte(e.target.value)}
-                      className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 placeholder-gray-600 outline-none transition focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
-                    />
-                  </div>
-                  <div className="mb-4">
-                    <label className="mb-1 block text-xs text-gray-500">
-                      Precio (COP/kWh)
-                    </label>
-                    <input
-                      type="number"
-                      min={1}
-                      value={simPrecio}
-                      onChange={(e) =>
-                        setSimPrecio(Math.max(1, Number(e.target.value) || 1))
-                      }
-                      className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
-                    />
+                    <input type="text" placeholder="Nombre de la contraparte" value={wizSimContraparte} onChange={e => setWizSimContraparte(e.target.value)}
+                      className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 placeholder-gray-600 outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30" />
                   </div>
 
-                  {/* Perfil horario */}
                   <div className="mb-4">
-                    <label className="mb-2 block text-xs text-gray-500">
-                      Distribución horaria
-                    </label>
+                    <label className="mb-1 block text-xs text-gray-500">Precio (COP/kWh)</label>
+                    <input type="number" min={1} value={wizSimPrecio} onChange={e => setWizSimPrecio(Math.max(1, Number(e.target.value) || 1))}
+                      className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30" />
+                  </div>
+
+                  <div className="mb-4">
+                    <label className="mb-2 block text-xs text-gray-500">Distribución horaria</label>
                     <div className="grid grid-cols-4 gap-1.5">
-                      {(
-                        [
-                          ['plano', 'Plano 24h'],
-                          ['bloques', 'Bloques'],
-                          ['solar', 'Solar'],
-                          ['excel', 'Excel'],
-                        ] as [SimPerfilTipo, string][]
-                      ).map(([p, lbl]) => (
-                        <button
-                          key={p}
-                          type="button"
-                          onClick={() => setSimPerfilTipo(p)}
-                          className={`rounded-lg py-2 text-xs font-semibold transition ${
-                            simPerfilTipo === p
-                              ? 'bg-gray-600 text-white ring-1 ring-gray-400'
-                              : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200'
-                          }`}
-                        >
-                          {lbl}
+                      {(['plano','bloques','solar','excel'] as SimPerfilTipo[]).map(p => (
+                        <button key={p} type="button" onClick={() => setWizSimPerfilTipo(p)}
+                          className={`rounded-lg py-2 text-xs font-semibold capitalize transition ${wizSimPerfilTipo === p ? 'bg-gray-600 text-white ring-1 ring-gray-400' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+                          {p === 'plano' ? 'Plano 24h' : p === 'bloques' ? 'Bloques' : p === 'solar' ? 'Solar' : 'Excel'}
                         </button>
                       ))}
                     </div>
-
-                    {/* Profile-specific inputs */}
                     <div className="mt-3">
-                      {(simPerfilTipo === 'plano' || simPerfilTipo === 'solar') && (
+                      {(wizSimPerfilTipo === 'plano' || wizSimPerfilTipo === 'solar') && (
                         <div>
-                          <label className="mb-1 block text-xs text-gray-500">
-                            Energía mensual (MWh/mes)
-                          </label>
-                          <input
-                            type="number"
-                            min={1}
-                            value={simEnergiaMwh}
-                            onChange={(e) =>
-                              setSimEnergiaMwh(Math.max(1, Number(e.target.value) || 1))
-                            }
-                            className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
-                          />
-                          {simPerfilTipo === 'solar' && (
-                            <p className="mt-1.5 text-xs text-gray-600">
-                              Curva solar: 0 en H1-H6 y H19-H24 · sube H7-H12 · baja H13-H18
-                            </p>
-                          )}
+                          <label className="mb-1 block text-xs text-gray-500">Energía mensual (MWh/mes)</label>
+                          <input type="number" min={1} value={wizSimEnergiaMwh} onChange={e => setWizSimEnergiaMwh(Math.max(1, Number(e.target.value) || 1))}
+                            className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none focus:border-emerald-500/50" />
+                          {wizSimPerfilTipo === 'solar' && <p className="mt-1 text-xs text-gray-600">Curva solar: 0 en H1-H6 y H19-H24 · sube H7-H12 · baja H13-H18</p>}
                         </div>
                       )}
-
-                      {simPerfilTipo === 'bloques' && (
+                      {wizSimPerfilTipo === 'bloques' && (
                         <div className="space-y-2">
-                          {simBloques.map((b, idx) => (
-                            <div
-                              key={idx}
-                              className="flex items-end gap-2 rounded-lg border border-gray-700 bg-gray-950/60 p-3"
-                            >
+                          {wizSimBloques.map((b, idx) => (
+                            <div key={idx} className="flex items-end gap-2 rounded-lg border border-gray-700 bg-gray-950/60 p-3">
                               <div className="flex flex-col gap-1">
                                 <label className="text-xs text-gray-600">H ini</label>
-                                <select
-                                  value={b.horaInicio}
-                                  onChange={(e) =>
-                                    updateBloque(idx, 'horaInicio', Number(e.target.value))
-                                  }
-                                  className="w-16 rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 outline-none"
-                                >
-                                  {Array.from({ length: 24 }, (_, i) => i + 1).map((h) => (
-                                    <option key={h} value={h}>
-                                      H{h}
-                                    </option>
-                                  ))}
+                                <select value={b.horaInicio} onChange={e => wizUpdateBloque(idx,'horaInicio',Number(e.target.value))} className="w-16 rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 outline-none">
+                                  {Array.from({length:24},(_,i)=>i+1).map(h=><option key={h} value={h}>H{h}</option>)}
                                 </select>
                               </div>
                               <div className="flex flex-col gap-1">
                                 <label className="text-xs text-gray-600">H fin</label>
-                                <select
-                                  value={b.horaFin}
-                                  onChange={(e) =>
-                                    updateBloque(idx, 'horaFin', Number(e.target.value))
-                                  }
-                                  className="w-16 rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 outline-none"
-                                >
-                                  {Array.from({ length: 24 }, (_, i) => i + 1)
-                                    .filter((h) => h >= b.horaInicio)
-                                    .map((h) => (
-                                      <option key={h} value={h}>
-                                        H{h}
-                                      </option>
-                                    ))}
+                                <select value={b.horaFin} onChange={e => wizUpdateBloque(idx,'horaFin',Number(e.target.value))} className="w-16 rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 outline-none">
+                                  {Array.from({length:24},(_,i)=>i+1).filter(h=>h>=b.horaInicio).map(h=><option key={h} value={h}>H{h}</option>)}
                                 </select>
                               </div>
                               <div className="flex flex-1 flex-col gap-1">
                                 <label className="text-xs text-gray-600">MWh/mes</label>
-                                <input
-                                  type="number"
-                                  min={1}
-                                  value={b.mwhMes}
-                                  onChange={(e) =>
-                                    updateBloque(idx, 'mwhMes', Math.max(1, Number(e.target.value) || 1))
-                                  }
-                                  className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 outline-none"
-                                />
+                                <input type="number" min={1} value={b.mwhMes} onChange={e=>wizUpdateBloque(idx,'mwhMes',Math.max(1,Number(e.target.value)||1))} className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-100 outline-none" />
                               </div>
-                              {simBloques.length > 1 && (
-                                <button
-                                  type="button"
-                                  onClick={() => removeBloque(idx)}
-                                  className="rounded px-1.5 py-1.5 text-gray-600 hover:text-red-400 transition"
-                                >
-                                  ✕
-                                </button>
-                              )}
+                              {wizSimBloques.length > 1 && <button type="button" onClick={()=>wizRemoveBloque(idx)} className="rounded px-1.5 py-1.5 text-gray-600 hover:text-red-400 transition">✕</button>}
                             </div>
                           ))}
-                          {simBloques.length < 3 && (
-                            <button
-                              type="button"
-                              onClick={addBloque}
-                              className="w-full rounded-lg border border-dashed border-gray-700 py-2 text-xs text-gray-500 transition hover:border-gray-500 hover:text-gray-300"
-                            >
-                              + Agregar bloque
-                            </button>
-                          )}
-                          <p className="text-xs text-gray-600">
-                            Total:{' '}
-                            {formatMiles(
-                              simBloques.reduce((s, b) => s + b.mwhMes, 0),
-                              0,
-                            )}{' '}
-                            MWh/mes
-                          </p>
+                          {wizSimBloques.length < 3 && <button type="button" onClick={wizAddBloque} className="w-full rounded-lg border border-dashed border-gray-700 py-2 text-xs text-gray-500 hover:border-gray-500 hover:text-gray-300 transition">+ Agregar bloque</button>}
+                          <p className="text-xs text-gray-600">Total: {formatMiles(wizSimBloques.reduce((s,b)=>s+b.mwhMes,0),0)} MWh/mes</p>
                         </div>
                       )}
-
-                      {simPerfilTipo === 'excel' && (
+                      {wizSimPerfilTipo === 'excel' && (
                         <div>
-                          <input
-                            ref={simExcelInputRef}
-                            type="file"
-                            accept=".xlsx,.xls,.csv"
-                            className="hidden"
-                            onChange={handleExcelUpload}
-                          />
-                          <button
-                            type="button"
-                            onClick={() => simExcelInputRef.current?.click()}
-                            className="w-full rounded-lg border border-dashed border-gray-600 py-3 text-sm text-gray-400 transition hover:border-emerald-500/50 hover:text-emerald-400"
-                          >
-                            📎 Cargar archivo Excel / CSV
-                          </button>
-                          {simExcelNombre && (
-                            <p className="mt-1.5 flex items-center gap-1.5 text-xs text-emerald-400">
-                              <span>✓</span>
-                              {simExcelNombre}
-                              {simExcel12x24 && (
-                                <span className="text-gray-600">
-                                  ({simExcel12x24.length} meses)
-                                </span>
-                              )}
-                            </p>
-                          )}
-                          <p className="mt-2 text-xs text-gray-600 leading-relaxed">
-                            Plantilla: filas = meses (Ene–Dic), columnas = H1..H24, valores en kWh.
-                            Exportar desde Excel como CSV o .xlsx.
-                          </p>
+                          <input ref={wizExcelInputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={wizHandleExcelUpload} />
+                          <button type="button" onClick={()=>wizExcelInputRef.current?.click()} className="w-full rounded-lg border border-dashed border-gray-600 py-3 text-sm text-gray-400 hover:border-emerald-500/50 hover:text-emerald-400 transition">📎 Cargar archivo Excel / CSV</button>
+                          {wizSimExcelNombre && <p className="mt-1.5 flex items-center gap-1.5 text-xs text-emerald-400">✓ {wizSimExcelNombre} {wizSimExcel12x24 && <span className="text-gray-600">({wizSimExcel12x24.length} meses)</span>}</p>}
                         </div>
                       )}
                     </div>
                   </div>
 
-                  {/* Vigencia y mercado */}
                   <div className="mb-4 grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="mb-1 block text-xs text-gray-500">Inicio vigencia</label>
-                      <input
-                        type="date"
-                        value={contratoInicio}
-                        onChange={(e) => setContratoInicio(e.target.value)}
-                        className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
-                      />
+                    <div><label className="mb-1 block text-xs text-gray-500">Inicio vigencia</label>
+                      <input type="date" value={wizContratoInicio} onChange={e=>setWizContratoInicio(e.target.value)} className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none [color-scheme:dark] focus:border-emerald-500/50" />
                     </div>
-                    <div>
-                      <label className="mb-1 block text-xs text-gray-500">Fin vigencia</label>
-                      <input
-                        type="date"
-                        value={contratoFin}
-                        onChange={(e) => setContratoFin(e.target.value)}
-                        className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none transition [color-scheme:dark] focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30"
-                      />
+                    <div><label className="mb-1 block text-xs text-gray-500">Fin vigencia</label>
+                      <input type="date" value={wizContratoFin} onChange={e=>setWizContratoFin(e.target.value)} className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none [color-scheme:dark] focus:border-emerald-500/50" />
                     </div>
                   </div>
+
                   <div className="mb-5">
                     <label className="mb-1 block text-xs text-gray-500">Tipo de mercado</label>
-                    <select
-                      value={simTipoMercado}
-                      onChange={(e) => setSimTipoMercado(e.target.value as SimMercado)}
-                      className={CLASE_SELECT + ' w-full'}
-                    >
+                    <select value={wizSimTipoMercado} onChange={e=>setWizSimTipoMercado(e.target.value as SimMercado)} className={CLASE_SELECT + ' w-full'}>
                       <option value="regulado">Regulado (Compra R)</option>
                       <option value="no_regulado">No Regulado (Compra NR)</option>
-                      <option value="ambos">Ambos (50 % R + 50 % NR)</option>
+                      <option value="ambos">Ambos (50% R + 50% NR)</option>
                     </select>
                   </div>
 
-                  {/* CTA */}
-                  <button
-                    type="button"
-                    onClick={cargarSimulacion}
-                    disabled={simCargando}
-                    className="w-full rounded-lg bg-emerald-600 py-3 text-sm font-bold text-white shadow transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {simCargando ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                        Simulando…
-                      </span>
-                    ) : (
-                      '⚡ Simular impacto'
-                    )}
-                  </button>
-                  {simError && (
-                    <div className="mt-3 rounded-lg border border-red-900/50 bg-red-950/30 px-4 py-3 text-sm text-red-400">
-                      {simError}
+                  <div className="flex items-center gap-3">
+                    <button type="button" onClick={()=>setWizPaso(2)} className="rounded-lg border border-gray-700 px-5 py-2.5 text-sm font-semibold text-gray-300 transition hover:bg-gray-800">← Escenario PB</button>
+                    <button type="button" onClick={wizSimular} disabled={wizSimCargando} className="flex-1 rounded-lg bg-emerald-600 py-2.5 text-sm font-bold text-white shadow transition hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed">
+                      {wizSimCargando ? <span className="flex items-center justify-center gap-2"><span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />Simulando…</span> : '⚡ Simular impacto'}
+                    </button>
+                  </div>
+                  {wizSimError && <div className="mt-3 rounded-lg border border-red-900/50 bg-red-950/30 px-4 py-3 text-sm text-red-400">{wizSimError}</div>}
+                </section>
+
+                <div className="space-y-4 lg:col-span-2">
+                  {wizPBPromedioGlobal !== null && (
+                    <div className="rounded-xl border border-gray-700 bg-gray-900/40 p-4">
+                      <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-gray-500">Escenario PB seleccionado</p>
+                      <div className="space-y-1.5 text-sm text-gray-300">
+                        <p>📅 <span className="font-semibold text-white">{wizPBDesde}</span> → <span className="font-semibold text-white">{wizPBHasta}</span></p>
+                        <p>📊 PB promedio: <span className="font-semibold text-white">{formatNumero(wizPBPromedioGlobal)} COP/kWh</span></p>
+                        <p>Spread mock: <span className={`font-semibold ${PRECIO_MOCK_COMPRA_R - wizPBPromedioGlobal >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{PRECIO_MOCK_COMPRA_R - wizPBPromedioGlobal >= 0 ? '+' : ''}{formatNumero(PRECIO_MOCK_COMPRA_R - wizPBPromedioGlobal)} COP/kWh</span></p>
+                      </div>
                     </div>
                   )}
-                </section>
+                  {wizResumenMensual.length > 0 && (
+                    <div className="rounded-xl border border-gray-700 bg-gray-900/40 p-4">
+                      <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-gray-500">Período a simular</p>
+                      <div className="space-y-1.5 text-sm text-gray-300">
+                        <p>📆 <span className="font-semibold text-white">{wizPeriodoInicio}</span> → <span className="font-semibold text-white">{wizPeriodoFin}</span></p>
+                        <p>🏭 Meses: <span className="font-semibold text-white">{wizResumenMensual.length}</span></p>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
+            )}
 
-              {/* ═══════════════════════════════════════════════════════════
-                  RIGHT PANEL — results
-              ═══════════════════════════════════════════════════════════ */}
-              <div className="space-y-4 lg:col-span-3">
-                {!simResultado && !simCargando && (
-                  <div className="flex h-80 flex-col items-center justify-center rounded-xl border border-dashed border-gray-700 bg-gray-900/30 text-center">
-                    <span className="mb-3 text-3xl">⚡</span>
-                    <p className="text-sm text-gray-400">Configura el escenario y el contrato</p>
-                    <p className="mt-1 text-xs text-gray-600">
-                      Pulsa «Simular impacto» para ver los resultados comparativos
-                    </p>
-                  </div>
-                )}
-
-                {simResultado && (() => {
-                  const { resumen_antes: ra, resumen_despues: rd, recomendacion, delta_costo_mcop } = simResultado
-                  const semCfg: Record<SimRecomendacion, { borderBg: string; color: string; icon: string; titulo: string; desc: string }> = {
-                    verde: {
-                      borderBg: 'border-emerald-500/40 bg-emerald-500/10',
-                      color: 'text-emerald-400',
-                      icon: '✓',
-                      titulo: 'CONVIENE',
-                      desc: 'El contrato mejora la posición y reduce el costo de bolsa.',
-                    },
-                    amarillo: {
-                      borderBg: 'border-amber-500/40 bg-amber-500/10',
-                      color: 'text-amber-400',
-                      icon: '⚠',
-                      titulo: 'EVALUAR',
-                      desc: 'Impacto mixto: mejora algunos indicadores pero no todos.',
-                    },
-                    rojo: {
-                      borderBg: 'border-red-500/40 bg-red-500/10',
-                      color: 'text-red-400',
-                      icon: '✗',
-                      titulo: 'NO CONVIENE',
-                      desc: 'El contrato empeora la posición y aumenta el costo de bolsa.',
-                    },
-                  }
-                  const sem = semCfg[recomendacion]
-
-                  return (
-                    <>
-                      {/* PARTE B — Posición base */}
-                      <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-4">
-                        <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-gray-500">
-                          B — Posición base (sin contrato nuevo)
-                        </p>
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="rounded-lg bg-gray-950/50 px-4 py-3">
-                            <p className="text-xs text-gray-500">Posición Neta</p>
-                            <p className={`mt-1 text-xl font-bold tabular-nums ${ra.posicion_neta_total_mwh <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                              {formatMiles(ra.posicion_neta_total_mwh, 0)} <span className="text-sm font-normal text-gray-500">MWh</span>
-                            </p>
-                          </div>
-                          <div className="rounded-lg bg-gray-950/50 px-4 py-3">
-                            <p className="text-xs text-gray-500">Costo Bolsa</p>
-                            <p className={`mt-1 text-xl font-bold tabular-nums ${ra.costo_bolsa_total_mcop <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                              {formatMiles(ra.costo_bolsa_total_mcop, 2)} <span className="text-sm font-normal text-gray-500">M COP</span>
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Semáforo */}
-                      <div className={`rounded-xl border px-5 py-4 ${sem.borderBg}`}>
-                        <div className="flex items-center gap-3">
-                          <span className={`text-2xl font-bold ${sem.color}`}>{sem.icon}</span>
-                          <div className="flex-1">
-                            <p className={`text-base font-bold ${sem.color}`}>{sem.titulo}</p>
-                            <p className="text-sm text-gray-400">{sem.desc}</p>
-                          </div>
-                          <span className={`text-right text-sm font-semibold tabular-nums ${delta_costo_mcop < 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {delta_costo_mcop < 0 ? '▼' : '▲'} {Math.abs(delta_costo_mcop).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} M COP
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Explicación dinámica de resultados */}
-                      <PanelExplicacion resultado={simResultado} simTipo={simTipo} />
-
-                      {/* PARTE D — KPI comparativas */}
-                      <div className="grid grid-cols-2 gap-3">
-                        <SimCompareCard
-                          label="Posición Neta (MWh)"
-                          antes={ra.posicion_neta_total_mwh}
-                          despues={rd.posicion_neta_total_mwh}
-                          formato={(v) => formatMiles(v, 0)}
-                          mejoraSiMenor={simTipo === 'venta'}
-                        />
-                        <SimCompareCard
-                          label="Costo/Ingreso Bolsa (M COP)"
-                          antes={ra.costo_bolsa_total_mcop}
-                          despues={rd.costo_bolsa_total_mcop}
-                          formato={(v) => formatMiles(v, 2)}
-                          mejoraSiMenor
-                        />
-                        <SimCompareCard
-                          label="Hora pico compra"
-                          antes={ra.hora_pico_compra}
-                          despues={rd.hora_pico_compra}
-                          formato={(v) => `H${v}`}
-                          soloInfo
-                        />
-                        <SimCompareCard
-                          label="Hora pico venta"
-                          antes={ra.hora_pico_venta}
-                          despues={rd.hora_pico_venta}
-                          formato={(v) => `H${v}`}
-                          soloInfo
-                        />
-                      </div>
-                    </>
-                  )
-                })()}
-              </div>
-            </div>
-
-            {/* ── Chart + Table (full width) ─────────────────────────────── */}
-            {simResultado && (() => {
-              const lineaColor = { verde: '#22c55e', amarillo: '#eab308', rojo: '#ef4444' }[simResultado.recomendacion]
+            {/* ══ PASO 4 — Resultado ══ */}
+            {wizPaso === 4 && wizResultado && (() => {
+              const { resumen_antes: ra, resumen_despues: rd, recomendacion, delta_costo_mcop, por_mes, perfil_horario } = wizResultado
+              const pbProm = wizPBPromedioGlobal ?? 0
+              const spreadNuevo = wizSimTipo === 'compra' ? pbProm - wizSimPrecio : wizSimPrecio - pbProm
+              const semCfg: Record<SimRecomendacion, {border:string;color:string;icon:string;titulo:string}> = {
+                verde:    { border: 'border-emerald-500/40 bg-emerald-500/10', color: 'text-emerald-400', icon: '✓', titulo: 'CONVIENE' },
+                amarillo: { border: 'border-amber-500/40 bg-amber-500/10',     color: 'text-amber-400',   icon: '⚠', titulo: 'EVALUAR'  },
+                rojo:     { border: 'border-red-500/40 bg-red-500/10',         color: 'text-red-400',     icon: '✗', titulo: 'NO CONVIENE en este escenario' },
+              }
+              const sem = semCfg[recomendacion]
+              const ensoLabel = wizFuentePB === 'enso' ? (ENSO_COMPLETO.find(e => e.key === wizEnsoKey)?.label ?? 'ENSO') : `${wizPBDesde} → ${wizPBHasta}`
+              const textoRec = recomendacion === 'verde'
+                ? `El contrato de ${wizSimTipo} a ${wizSimPrecio} COP/kWh genera un spread favorable de +${formatNumero(Math.abs(spreadNuevo))} COP/kWh vs el PB del escenario ${ensoLabel}. Esto representa un ahorro/ingreso adicional de ${formatNumero(Math.abs(delta_costo_mcop), 2)} M COP en el período.`
+                : recomendacion === 'amarillo'
+                ? `El spread es marginal (${formatNumero(spreadNuevo, 1)} COP/kWh). Conviene si el PB se mantiene ${wizSimTipo === 'compra' ? 'por encima' : 'por debajo'} de ${wizSimPrecio} COP/kWh. El escenario muestra un PB promedio de ${formatNumero(pbProm)} COP/kWh.`
+                : `Con el PB del escenario ${ensoLabel} (promedio ${formatNumero(pbProm)} COP/kWh), el contrato a ${wizSimPrecio} COP/kWh genera un spread negativo de ${formatNumero(spreadNuevo, 1)} COP/kWh. Sin embargo, si el PB ${wizSimTipo === 'compra' ? 'baja a menos de' : 'sube por encima de'} ${wizSimPrecio} COP/kWh, el contrato sería favorable.`
+              const lineaColor = { verde: '#22c55e', amarillo: '#eab308', rojo: '#ef4444' }[recomendacion]
               return (
-                <>
-                  <section className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
-                    <h2 className="mb-1 text-lg font-semibold text-gray-200">
-                      Posición Neta hora a hora — promedio del período
-                    </h2>
-                    <p className="mb-5 text-xs text-gray-500">
-                      Posición actual (azul) vs. con el nuevo contrato (línea punteada)
-                    </p>
-                    <div className="h-72 w-full">
+                <div className="space-y-5">
+                  <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-5 py-3">
+                    <p className="text-xs font-semibold uppercase tracking-widest text-gray-400">Capítulo 3 — Impacto del nuevo contrato</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <MetricCard label="Δ Posición Neta (MWh)" value={`${rd.posicion_neta_total_mwh - ra.posicion_neta_total_mwh >= 0 ? '+' : ''}${formatMiles(rd.posicion_neta_total_mwh - ra.posicion_neta_total_mwh, 0)}`} accent="text-white" />
+                    <MetricCard label="Δ Costo Bolsa (M COP)" value={`${delta_costo_mcop >= 0 ? '+' : ''}${formatMiles(delta_costo_mcop, 2)}`} accent={delta_costo_mcop < 0 ? 'text-emerald-400' : 'text-red-400'} />
+                    <MetricCard label="Spread nuevo vs PB" value={`${spreadNuevo >= 0 ? '+' : ''}${formatNumero(spreadNuevo)} COP/kWh`} accent={spreadNuevo >= 0 ? 'text-emerald-400' : 'text-red-400'} />
+                    <MetricCard label="Energía contrato" value={`${formatMiles(wizSimPerfilTipo === 'bloques' ? wizSimBloques.reduce((s,b)=>s+b.mwhMes,0) : wizSimEnergiaMwh, 0)} MWh/mes`} accent="text-sky-400" />
+                  </div>
+                  <TablaAnalisis
+                    encabezados={['Mes','Pos. Actual (MWh)','Pos. Nueva (MWh)','Δ (MWh)','Costo Actual (M COP)','Costo Nuevo (M COP)','Ahorro (M COP)']}
+                    filas={<>
+                      {por_mes.map(m => (
+                        <tr key={m.mes} className="transition-colors hover:bg-gray-800/40">
+                          <td className="px-4 py-2.5 font-medium text-gray-200">{m.mes}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums text-gray-300">{formatMiles(m.pos_actual_mwh)}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums text-blue-300">{formatMiles(m.pos_nueva_mwh)}</td>
+                          <td className={`px-4 py-2.5 text-right font-medium tabular-nums ${m.diferencia_mwh <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{m.diferencia_mwh > 0 ? '+' : ''}{formatMiles(m.diferencia_mwh)}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums text-gray-300">{formatMiles(m.costo_actual_mcop)}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums text-blue-300">{formatMiles(m.costo_nuevo_mcop)}</td>
+                          <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${m.ahorro_mcop >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{m.ahorro_mcop > 0 ? '+' : ''}{formatMiles(m.ahorro_mcop)}</td>
+                        </tr>
+                      ))}
+                    </>}
+                  />
+                  <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
+                    <p className="mb-1 text-sm font-medium text-gray-400">Posición Neta hora a hora — promedio del período</p>
+                    <p className="mb-4 text-xs text-gray-600">Azul = posición actual · Punteada = con nuevo contrato</p>
+                    <div className="h-64">
                       <ResponsiveContainer width="100%" height="100%">
-                        <LineChart
-                          data={simResultado.perfil_horario}
-                          margin={{ top: 8, right: 16, left: 0, bottom: 8 }}
-                        >
+                        <LineChart data={perfil_horario} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
                           <CartesianGrid stroke="#374151" strokeDasharray="3 3" />
-                          <XAxis
-                            dataKey="hora"
-                            type="number"
-                            domain={[1, 24]}
-                            ticks={Array.from({ length: 24 }, (_, i) => i + 1)}
-                            stroke="#9ca3af"
-                            tick={{ fill: '#9ca3af', fontSize: 12 }}
-                          />
-                          <YAxis stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 12 }} />
-                          <Tooltip
-                            contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '8px', color: '#f3f4f6' }}
-                            labelFormatter={(h) => `Hora: ${h}`}
-                            formatter={(v, n) => [`${formatMiles(Number(v), 2)} MWh`, n]}
-                          />
-                          <Legend wrapperStyle={{ color: '#9ca3af', paddingTop: 12 }} />
-                          <Line type="monotone" dataKey="posicion_antes_mwh" name="Posición actual" stroke="#3b82f6" strokeWidth={2} dot={false} />
-                          <Line type="monotone" dataKey="posicion_despues_mwh" name="Con nuevo contrato" stroke={lineaColor} strokeWidth={2.5} dot={false} strokeDasharray="6 3" />
+                          <XAxis dataKey="hora" type="number" domain={[1,24]} ticks={Array.from({length:24},(_,i)=>i+1)} stroke="#9ca3af" tick={{fill:'#9ca3af',fontSize:11}} />
+                          <YAxis stroke="#9ca3af" tick={{fill:'#9ca3af',fontSize:11}} />
+                          <Tooltip contentStyle={{backgroundColor:'#111827',border:'1px solid #374151',borderRadius:'8px',color:'#f3f4f6'}} labelFormatter={h=>`Hora ${h}`} formatter={(v,n)=>[`${formatMiles(Number(v),2)} MWh`,n]} />
+                          <Legend wrapperStyle={{color:'#9ca3af',paddingTop:8}} />
+                          <Line type="monotone" dataKey="posicion_antes_mwh"   name="Posición actual"      stroke="#3b82f6"   strokeWidth={2}   dot={false} />
+                          <Line type="monotone" dataKey="posicion_despues_mwh" name="Con nuevo contrato"   stroke={lineaColor} strokeWidth={2.5} dot={false} strokeDasharray="6 3" />
                         </LineChart>
                       </ResponsiveContainer>
                     </div>
-                  </section>
+                  </div>
 
-                  <section className="overflow-hidden rounded-xl border border-gray-800">
-                    <div className="border-b border-gray-800 bg-gray-900/80 px-6 py-4">
-                      <h2 className="text-lg font-semibold text-gray-200">Resumen por mes</h2>
+                  <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-5 py-3">
+                    <p className="text-xs font-semibold uppercase tracking-widest text-gray-400">Capítulo 4 — Conclusión y recomendación</p>
+                  </div>
+                  <div className={`rounded-xl border px-5 py-4 ${sem.border}`}>
+                    <div className="flex items-start gap-4">
+                      <span className={`text-3xl font-bold ${sem.color}`}>{sem.icon}</span>
+                      <div className="flex-1">
+                        <p className={`text-lg font-bold ${sem.color}`}>{sem.titulo}</p>
+                        <p className="mt-1 text-sm text-gray-300 leading-relaxed">{textoRec}</p>
+                      </div>
+                      <span className={`shrink-0 text-base font-semibold tabular-nums ${delta_costo_mcop < 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {delta_costo_mcop < 0 ? '▼' : '▲'} {Math.abs(delta_costo_mcop).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})} M COP
+                      </span>
                     </div>
-                    <div className="bg-gray-900/40 px-6 py-5">
-                      <TablaAnalisis
-                        encabezados={['Mes', 'Pos. Actual (MWh)', 'Pos. Nueva (MWh)', 'Diferencia (MWh)', 'Costo Actual (M COP)', 'Costo Nuevo (M COP)', 'Ahorro (M COP)']}
-                        filas={
-                          <>
-                            {simResultado.por_mes.map((fila) => (
-                              <tr key={fila.mes} className="transition-colors hover:bg-gray-800/40">
-                                <td className="px-4 py-2.5 font-medium text-gray-200">{fila.mes}</td>
-                                <td className="px-4 py-2.5 text-right tabular-nums text-gray-300">{formatMiles(fila.pos_actual_mwh)}</td>
-                                <td className="px-4 py-2.5 text-right tabular-nums text-blue-300">{formatMiles(fila.pos_nueva_mwh)}</td>
-                                <td className={`px-4 py-2.5 text-right font-medium tabular-nums ${fila.diferencia_mwh <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                  {fila.diferencia_mwh > 0 ? '+' : ''}{formatMiles(fila.diferencia_mwh)}
-                                </td>
-                                <td className="px-4 py-2.5 text-right tabular-nums text-gray-300">{formatMiles(fila.costo_actual_mcop)}</td>
-                                <td className="px-4 py-2.5 text-right tabular-nums text-blue-300">{formatMiles(fila.costo_nuevo_mcop)}</td>
-                                <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${fila.ahorro_mcop >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                  {fila.ahorro_mcop > 0 ? '+' : ''}{formatMiles(fila.ahorro_mcop)}
-                                </td>
-                              </tr>
-                            ))}
-                          </>
-                        }
-                      />
+                  </div>
+                  <div className="rounded-xl border border-gray-700 bg-gray-950/60 px-5 py-4">
+                    <div className="flex items-start gap-3">
+                      <span className="shrink-0 text-blue-400">ℹ</span>
+                      <div className="text-sm text-gray-300 leading-relaxed">
+                        <p><span className="font-semibold text-white">Punto de equilibrio:</span>{' '}
+                        el contrato es favorable cuando el PB{' '}
+                        {wizSimTipo === 'compra' ? 'supera' : 'está por debajo de'}{' '}
+                        <span className="font-semibold text-white">{wizSimPrecio} COP/kWh</span>.</p>
+                        <p className="mt-1">El escenario analizado tiene PB promedio de{' '}
+                        <span className="font-semibold text-white">{formatNumero(pbProm)} COP/kWh</span>,{' '}
+                        {wizSimTipo === 'compra' ? (pbProm > wizSimPrecio ? 'por encima' : 'por debajo') : (pbProm < wizSimPrecio ? 'por debajo' : 'por encima')}{' '}
+                        del punto de equilibrio.</p>
+                      </div>
                     </div>
-                  </section>
-                </>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                    <SimCompareCard label="Posición Neta (MWh)" antes={ra.posicion_neta_total_mwh} despues={rd.posicion_neta_total_mwh} formato={v=>formatMiles(v,0)} mejoraSiMenor={wizSimTipo==='venta'} />
+                    <SimCompareCard label="Costo/Ingreso (M COP)" antes={ra.costo_bolsa_total_mcop} despues={rd.costo_bolsa_total_mcop} formato={v=>formatMiles(v,2)} mejoraSiMenor />
+                    <SimCompareCard label="Hora pico compra" antes={ra.hora_pico_compra} despues={rd.hora_pico_compra} formato={v=>`H${v}`} soloInfo />
+                    <SimCompareCard label="Hora pico venta"  antes={ra.hora_pico_venta}  despues={rd.hora_pico_venta}  formato={v=>`H${v}`} soloInfo />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button type="button" onClick={()=>setWizPaso(3)} className="rounded-lg border border-gray-700 px-5 py-2.5 text-sm font-semibold text-gray-300 transition hover:bg-gray-800">← Contrato</button>
+                    <button type="button" onClick={wizDescargarJSON} className="rounded-lg border border-emerald-700 bg-emerald-950/40 px-5 py-2.5 text-sm font-semibold text-emerald-400 transition hover:bg-emerald-900/40">💾 Guardar simulación (JSON)</button>
+                    <button type="button" onClick={wizReset} className="ml-auto rounded-lg bg-gray-700 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-gray-600">🔄 Nueva simulación</button>
+                  </div>
+                </div>
               )
             })()}
+            {wizPaso === 4 && !wizResultado && (
+              <div className="flex h-60 flex-col items-center justify-center rounded-xl border border-dashed border-gray-700">
+                <p className="text-gray-500">Ejecuta la simulación en el Paso 3</p>
+                <button type="button" onClick={()=>setWizPaso(3)} className="mt-3 text-sm text-emerald-400 hover:underline">← Volver al Paso 3</button>
+              </div>
+            )}
           </>
         )}
       </main>
@@ -2859,94 +2762,37 @@ function SimCompareCard({
   )
 }
 
-function PanelExplicacion({
-  resultado,
-  simTipo,
-}: {
-  resultado: SimResultado
-  simTipo: SimTipo
-}) {
-  const ra = resultado.resumen_antes
-  const rd = resultado.resumen_despues
-
-  const posAntes = ra.posicion_neta_total_mwh
-  const posNueva = rd.posicion_neta_total_mwh
-  const deltaMwh = posNueva - posAntes
-  const costoAntes = ra.costo_bolsa_total_mcop
-  const costoNuevo = rd.costo_bolsa_total_mcop
-
-  const esVendedor = posAntes < 0
-  const posAbsAntes = Math.abs(posAntes)
-  const posAbsNueva = Math.abs(posNueva)
-  const absDelta = Math.abs(deltaMwh)
-
+function WizardProgressBar({ pasoActual }: { pasoActual: number }) {
+  const pasos = [
+    { n: 1, label: 'Período' },
+    { n: 2, label: 'Escenario PB' },
+    { n: 3, label: 'Nuevo contrato' },
+    { n: 4, label: 'Resultado' },
+  ]
   return (
-    <div className="rounded-xl border border-gray-700/60 bg-gray-950/70 p-4">
-      <div className="flex items-start gap-3">
-        <span className="mt-0.5 shrink-0 text-base leading-none text-blue-400">ℹ</span>
-        <div className="min-w-0">
-          <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-gray-500">
-            ¿Cómo leer estos resultados?
-          </p>
-          <div className="space-y-2 text-sm leading-relaxed text-gray-300">
-            {esVendedor ? (
-              <>
-                <p>
-                  BIA tiene{' '}
-                  <span className="font-semibold text-white">
-                    posición vendedora neta de {formatMiles(posAbsAntes, 0)} MWh
-                  </span>{' '}
-                  en el período. Esto significa que BIA vende más energía de la que compra,
-                  generando un{' '}
-                  <span className="font-semibold text-emerald-400">
-                    ingreso de bolsa de {formatMiles(Math.abs(costoAntes), 2)} M COP
-                  </span>
-                  .
-                </p>
-                <p>
-                  Con el nuevo contrato de{' '}
-                  <span className="font-semibold text-white">{simTipo}</span>, la posición
-                  cambia a{' '}
-                  <span className="font-semibold text-white">
-                    {formatMiles(posAbsNueva, 0)} MWh
-                  </span>{' '}
-                  ({simTipo === 'compra' ? 'mejora' : 'empeora'} en {formatMiles(absDelta, 0)}{' '}
-                  MWh).{' '}
-                  {simTipo === 'compra'
-                    ? 'El nuevo contrato reduce la exposición vendedora.'
-                    : 'El nuevo contrato aumenta la posición vendedora.'}
-                </p>
-              </>
-            ) : (
-              <>
-                <p>
-                  BIA tiene{' '}
-                  <span className="font-semibold text-white">
-                    posición compradora neta de {formatMiles(posAntes, 0)} MWh
-                  </span>
-                  . Esto significa que BIA necesita comprar energía en bolsa, con un{' '}
-                  <span className="font-semibold text-red-400">
-                    costo estimado de {formatMiles(costoAntes, 2)} M COP
-                  </span>
-                  .
-                </p>
-                <p>
-                  Con el nuevo contrato de{' '}
-                  <span className="font-semibold text-white">{simTipo}</span>, el costo cambia
-                  a{' '}
-                  <span
-                    className={`font-semibold ${costoNuevo <= costoAntes ? 'text-emerald-400' : 'text-red-400'}`}
-                  >
-                    {formatMiles(costoNuevo, 2)} M COP
-                  </span>
-                  .
-                </p>
-              </>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
+    <nav className="overflow-hidden rounded-xl border border-gray-800 bg-gray-900/60 px-6 py-4">
+      <ol className="flex items-center justify-between gap-2">
+        {pasos.map((p, i) => {
+          const activo     = p.n === pasoActual
+          const completado = p.n < pasoActual
+          return (
+            <li key={p.n} className="flex flex-1 items-center">
+              <div className="flex items-center gap-2">
+                <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold transition ${completado ? 'bg-emerald-600 text-white' : activo ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/40' : 'bg-gray-800 text-gray-500'}`}>
+                  {completado ? '✓' : p.n}
+                </span>
+                <span className={`text-sm font-medium whitespace-nowrap ${activo ? 'text-white' : completado ? 'text-emerald-400' : 'text-gray-500'}`}>
+                  {p.label}
+                </span>
+              </div>
+              {i < pasos.length - 1 && (
+                <div className={`mx-3 h-px flex-1 transition ${p.n < pasoActual ? 'bg-emerald-600' : 'bg-gray-700'}`} />
+              )}
+            </li>
+          )
+        })}
+      </ol>
+    </nav>
   )
 }
 
