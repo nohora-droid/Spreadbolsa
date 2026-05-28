@@ -437,8 +437,12 @@ class ContratoSimulacion(BaseModel):
     tipo: str = Field("compra", description="'compra' o 'venta'")
     contraparte: str = Field("", description="Nombre libre de la contraparte")
     precio_cop_kwh: float = Field(..., gt=0, description="Precio del contrato en COP/kWh")
-    fecha_inicio: str = Field(..., description="Inicio de vigencia YYYY-MM-DD")
-    fecha_fin: str = Field(..., description="Fin de vigencia YYYY-MM-DD")
+    # ── Período del escenario de precio de bolsa ──────────────────────────────
+    pb_desde: str = Field(..., description="Inicio del período PB histórico YYYY-MM-DD")
+    pb_hasta: str = Field(..., description="Fin del período PB histórico YYYY-MM-DD")
+    # ── Vigencia del contrato simulado ────────────────────────────────────────
+    contrato_inicio: str = Field(..., description="Inicio de vigencia del contrato YYYY-MM-DD")
+    contrato_fin: str = Field(..., description="Fin de vigencia del contrato YYYY-MM-DD")
     tipo_mercado: str = Field("regulado", description="'regulado', 'no_regulado' o 'ambos'")
     perfil_horario: str = Field(
         "plano",
@@ -463,13 +467,20 @@ def simulate(contrato: ContratoSimulacion):
     Retorna: resumen_antes, resumen_despues, recomendacion (verde/amarillo/rojo),
     perfil_horario promedio (24h) y tabla por mes.
     """
-    # Validar fechas
-    _validar_fecha_iso(contrato.fecha_inicio, "fecha_inicio")
-    _validar_fecha_iso(contrato.fecha_fin, "fecha_fin")
-    if contrato.fecha_inicio > contrato.fecha_fin:
+    # Validar los cuatro rangos de fechas
+    _validar_fecha_iso(contrato.pb_desde, "pb_desde")
+    _validar_fecha_iso(contrato.pb_hasta, "pb_hasta")
+    _validar_fecha_iso(contrato.contrato_inicio, "contrato_inicio")
+    _validar_fecha_iso(contrato.contrato_fin, "contrato_fin")
+    if contrato.pb_desde > contrato.pb_hasta:
         raise HTTPException(
             status_code=400,
-            detail="fecha_inicio no puede ser posterior a fecha_fin.",
+            detail="pb_desde no puede ser posterior a pb_hasta.",
+        )
+    if contrato.contrato_inicio > contrato.contrato_fin:
+        raise HTTPException(
+            status_code=400,
+            detail="contrato_inicio no puede ser posterior a contrato_fin.",
         )
 
     # Validar enumeraciones
@@ -499,12 +510,12 @@ def simulate(contrato: ContratoSimulacion):
             detail=f"No fue posible cargar inventario: {error}",
         ) from error
 
-    # Cargar precios de bolsa para el período de vigencia
+    # Cargar precios de bolsa para el período del ESCENARIO (pb_desde → pb_hasta)
     try:
         df_pb = cargar_pb_sql(
             database_id=METABASE_DATABASE_PB,
-            fecha_inicio=contrato.fecha_inicio,
-            fecha_fin=contrato.fecha_fin,
+            fecha_inicio=contrato.pb_desde,
+            fecha_fin=contrato.pb_hasta,
         )
     except Exception as error:
         raise HTTPException(
@@ -515,7 +526,10 @@ def simulate(contrato: ContratoSimulacion):
     if df_pb.empty:
         raise HTTPException(
             status_code=404,
-            detail="No hay datos de PB para el rango de fechas del contrato.",
+            detail=(
+                f"No hay datos de PB para el período del escenario "
+                f"({contrato.pb_desde} a {contrato.pb_hasta})."
+            ),
         )
 
     # Ejecutar simulación
@@ -531,8 +545,10 @@ def simulate(contrato: ContratoSimulacion):
             df_pb=df_pb,
             tipo=contrato.tipo,
             precio_cop_kwh=contrato.precio_cop_kwh,
-            fecha_inicio=contrato.fecha_inicio,
-            fecha_fin=contrato.fecha_fin,
+            pb_desde=contrato.pb_desde,
+            pb_hasta=contrato.pb_hasta,
+            contrato_inicio=contrato.contrato_inicio,
+            contrato_fin=contrato.contrato_fin,
             tipo_mercado=contrato.tipo_mercado,
             perfil_horario=contrato.perfil_horario,
             energia_mensual_mwh=contrato.energia_mensual_mwh,

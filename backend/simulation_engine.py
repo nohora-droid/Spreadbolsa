@@ -28,6 +28,38 @@ _PERFIL_A_CLAVE: dict[str, str] = {
     "festivo":   "compra_fe",
 }
 
+
+def _anio_inventario(inventario: dict[str, pd.DataFrame]) -> int:
+    """
+    Detecta el año del inventario leyendo la primera etiqueta de período.
+    Ej. "Ene-26" → 2026. Retorna 2026 si no puede determinarlo.
+    """
+    for clave in ("compra_or", "compra_nr", "venta"):
+        df = inventario.get(clave)
+        if df is not None and not df.empty:
+            periodo = str(df["Periodo"].iloc[0])          # ej. "Ene-26"
+            partes = periodo.split("-")
+            if len(partes) == 2 and partes[1].isdigit():
+                return 2000 + int(partes[1])
+    return 2026
+
+
+def _proxy_fecha(pb_fecha_str: str, inv_anio: int) -> str:
+    """
+    Mapea una fecha histórica de PB a la fecha equivalente en el año del inventario.
+
+    Esto permite usar precios de bolsa históricos (escenario) junto con el inventario
+    del año vigente (ej. 2026). El tipo de día (festivo, sábado, etc.) se preserva
+    usando la fecha original en `calcular_posicion_neta(fecha_tipo_dia=pb_fecha)`.
+
+    Ej.: "2024-03-15" con inv_anio=2026 → "2026-03-15"
+    Maneja febrero-29 en años no bisiestos recortando al 28.
+    """
+    obj = datetime.strptime(pb_fecha_str, "%Y-%m-%d")
+    max_dia = calendar.monthrange(inv_anio, obj.month)[1]
+    dia = min(obj.day, max_dia)
+    return f"{inv_anio}-{obj.month:02d}-{dia:02d}"
+
 # Curva solar típica para Colombia (ecuatorial) — suma = 1.0
 # H1-H6 y H19-H24 = 0; campana gaussiana entre H7 y H18
 SOLAR_PESOS_24H: list[float] = [
@@ -154,8 +186,10 @@ def simular_contrato(
     df_pb: pd.DataFrame,
     tipo: str,
     precio_cop_kwh: float,
-    fecha_inicio: str,
-    fecha_fin: str,
+    pb_desde: str,
+    pb_hasta: str,
+    contrato_inicio: str,
+    contrato_fin: str,
     tipo_mercado: str,
     perfil_horario: str,
     energia_mensual_mwh: float | None = None,
@@ -164,43 +198,62 @@ def simular_contrato(
     perfil_excel_12x24: list[list[float]] | None = None,
 ) -> dict[str, Any]:
     """
-    Simula el impacto de un nuevo contrato sobre el portafolio actual.
+    Simula el impacto de un nuevo contrato sobre el portafolio actual usando
+    precios de bolsa históricos como escenario.
 
-    Para cada fecha con datos de PB en la vigencia del contrato:
-      1. Calcula posición neta y costo de bolsa actuales.
-      2. Distribuye la energía del contrato en 24 horas.
-      3. Aplica el contrato según tipo (compra/venta) y tipo_mercado.
-      4. Recalcula posición neta y costo de bolsa.
+    Flujo:
+      - El PB ya viene cargado para el período pb_desde..pb_hasta.
+      - Para cada fecha de PB (escenario histórico):
+          · Se calcula la posición neta del inventario usando el mes equivalente
+            del año del inventario (ej. Mar-24 PB → posición de Mar-26 inventario).
+          · El tipo de día (ordinario/sábado/festivo) se obtiene de la fecha real de PB
+            para preservar una mezcla realista de días laborables/festivos.
+          · La energía del contrato se distribuye en las 24h según el perfil elegido.
+      - contrato_inicio/contrato_fin se registran en el resumen pero no filtran PB.
 
     Returns dict con resumen_antes/despues, recomendacion, delta_costo_mcop,
     perfil_horario (24h promedio) y por_mes (tabla mensual).
     """
     energia_mensual_kwh = (energia_mensual_mwh or 0.0) * 1_000.0
 
-    # Filtrar PB al rango de vigencia
-    fechas_pb = sorted(df_pb["fecha"].dropna().unique().tolist())
-    fechas_vigencia = [f for f in fechas_pb if fecha_inicio <= f <= fecha_fin]
+    # Año del inventario para el mapeo de fechas históricas de PB
+    inv_anio = _anio_inventario(inventario)
 
-    if not fechas_vigencia:
+    # Todas las fechas de PB disponibles en el período del escenario
+    fechas_pb = sorted(df_pb["fecha"].dropna().unique().tolist())
+    fechas_escenario = [f for f in fechas_pb if pb_desde <= f <= pb_hasta]
+
+    if not fechas_escenario:
         raise ValueError(
-            f"No hay datos de PB en el rango de vigencia del contrato "
-            f"({fecha_inicio} a {fecha_fin})."
+            f"No hay datos de PB en el período del escenario "
+            f"({pb_desde} a {pb_hasta}). "
+            "Verifica que las fechas del escenario de PB coincidan con datos disponibles."
         )
 
     resultados_antes:   list[pd.DataFrame] = []
     resultados_despues: list[pd.DataFrame] = []
 
-    for fecha in fechas_vigencia:
-        df_pos_antes = calcular_posicion_neta(inventario, fecha)
-        df_pb_dia = df_pb.loc[df_pb["fecha"] == fecha].copy()
+    for pb_fecha in fechas_escenario:
+        # Fecha proxy: mismo mes/día pero en el año del inventario
+        # → permite buscar "Mar-26" aunque el PB sea de marzo 2024
+        inv_fecha = _proxy_fecha(pb_fecha, inv_anio)
+
+        # Posición actual: inventario del mes equivalente, tipo de día de la fecha real
+        df_pos_antes = calcular_posicion_neta(
+            inventario, inv_fecha, fecha_tipo_dia=pb_fecha
+        )
+
+        # Precio de bolsa: fecha histórica real (escenario)
+        df_pb_dia = df_pb.loc[df_pb["fecha"] == pb_fecha].copy()
 
         df_costo_antes = calcular_costo_bolsa(df_pos_antes, df_pb_dia)
-        df_costo_antes["fecha"] = fecha
+        df_costo_antes["fecha"] = pb_fecha
 
-        # Distribución horaria del nuevo contrato para este día
+        # Distribución horaria del contrato usando la fecha proxy
+        # (días-del-mes correctos para el mes, sin importar el año del PB)
         delta_kwh = _distribuir_energia_horaria(
             energia_mensual_kwh if energia_mensual_kwh > 0 else None,
-            fecha,
+            inv_fecha,
             perfil_horario,
             inventario,
             bloques=bloques,
@@ -229,7 +282,7 @@ def simular_contrato(
         )
 
         df_costo_despues = calcular_costo_bolsa(df_pos_nueva, df_pb_dia)
-        df_costo_despues["fecha"] = fecha
+        df_costo_despues["fecha"] = pb_fecha
 
         resultados_antes.append(df_costo_antes)
         resultados_despues.append(df_costo_despues)
@@ -317,7 +370,9 @@ def simular_contrato(
 
     print(
         f"[simulate] tipo={tipo} mercado={tipo_mercado} perfil={perfil_horario} "
-        f"energia={energia_mensual_mwh}MWh/mes fechas={len(fechas_vigencia)} "
+        f"energia={energia_mensual_mwh}MWh/mes "
+        f"pb={pb_desde}..{pb_hasta} contrato={contrato_inicio}..{contrato_fin} "
+        f"fechas_escenario={len(fechas_escenario)} inv_anio={inv_anio} "
         f"recomendacion={recomendacion} delta={delta_costo_mcop:+.2f}M COP"
     )
 

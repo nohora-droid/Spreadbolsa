@@ -196,10 +196,21 @@ def cargar_inventario(ruta_base: str | Path) -> dict[str, pd.DataFrame]:
 
 
 def calcular_posicion_neta(
-    inventario: dict[str, pd.DataFrame], fecha: str
+    inventario: dict[str, pd.DataFrame],
+    fecha: str,
+    fecha_tipo_dia: str | None = None,
 ) -> pd.DataFrame:
     """
     Calcula la posicion neta horaria para una fecha puntual.
+
+    Args:
+        inventario: Diccionario de inventarios de contratos.
+        fecha: Fecha para buscar el período en el inventario (YYYY-MM-DD).
+               Determina el mes/año del inventario a usar (ej. "2026-03-15" → "Mar-26").
+        fecha_tipo_dia: Fecha opcional para clasificar el tipo de día (ordinario/sábado/
+               festivo). Si se omite se usa la misma que `fecha`. Permite pasar una fecha
+               histórica real para obtener una mezcla realista de días laborables/festivos
+               mientras se busca en el inventario del año vigente.
 
     Formula por hora:
         compra_r = TO + inventario R segun tipo de dia
@@ -207,7 +218,12 @@ def calcular_posicion_neta(
     """
     fecha_obj = datetime.strptime(fecha, "%Y-%m-%d")
     periodo = _periodo_desde_fecha(fecha_obj)
-    tipo_dia = _tipo_dia(fecha_obj)
+
+    # Clasificar el día usando fecha_tipo_dia si se provee (p.ej. fecha histórica de PB)
+    tipo_dia_obj = (
+        datetime.strptime(fecha_tipo_dia, "%Y-%m-%d") if fecha_tipo_dia else fecha_obj
+    )
+    tipo_dia = _tipo_dia(tipo_dia_obj)
 
     if tipo_dia == "ordinario":
         clave_tipo_dia = "compra_or"

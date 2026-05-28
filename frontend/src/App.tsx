@@ -759,8 +759,10 @@ function App() {
         tipo: string
         contraparte: string
         precio_cop_kwh: number
-        fecha_inicio: string
-        fecha_fin: string
+        pb_desde: string
+        pb_hasta: string
+        contrato_inicio: string
+        contrato_fin: string
         tipo_mercado: string
         perfil_horario: string
         energia_mensual_mwh?: number
@@ -772,9 +774,10 @@ function App() {
         tipo: simTipo,
         contraparte: simContraparte,
         precio_cop_kwh: simPrecio,
-        // fecha_inicio/fin = período PB histórico (es lo que va a Metabase)
-        fecha_inicio: pbDesde,
-        fecha_fin: pbHasta,
+        pb_desde: pbDesde,
+        pb_hasta: pbHasta,
+        contrato_inicio: contratoInicio,
+        contrato_fin: contratoFin,
         tipo_mercado: simTipoMercado,
         perfil_horario: simPerfilTipo === 'excel' ? 'excel' : simPerfilTipo,
       }
