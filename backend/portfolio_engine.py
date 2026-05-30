@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from olibia_loader import cargar_posicion_olibia
 
-# Columnas horarias esperadas en los archivos de inventario.
+
+# Columnas horarias esperadas en los archivos de inventario (legado Excel).
 COLUMNAS_HORARIAS = [f"H{i}" for i in range(1, 25)]
 
 # Mapa de abreviaturas de meses en espanol para formar "Ene-26", "Feb-26", etc.
@@ -164,142 +166,101 @@ def _tipo_dia(fecha_obj: datetime) -> str:
     return "ordinario"
 
 
-def cargar_inventario(ruta_base: str | Path) -> dict[str, pd.DataFrame]:
+def cargar_inventario(ruta_base: str | Path) -> None:
     """
-    Carga los 7 archivos de inventario de contratos desde una carpeta base.
+    OBSOLETA: La carga de inventario ahora se realiza vía API de Olibia Energy.
 
-    Retorna un diccionario con llaves:
-    compra_or, compra_to, compra_sa, compra_do, compra_fe, compra_nr, venta
+    Esta función se conserva únicamente por compatibilidad de firma; devuelve None.
+    En su lugar usa cargar_posicion_olibia() de olibia_loader.
     """
-    base = Path(ruta_base)
-    archivos = {
-        "compra_or": "Inventario_Total_Ene-26_Dic-26 compra Ordinario R.xlsx",
-        "compra_to": "Inventario_Total_Ene-26_Dic-26 compra R TO.xlsx",
-        "compra_sa": "Inventario_Total_Ene-26_Dic-26 compra Sabado R.xlsx",
-        "compra_do": "Inventario_Total_Ene-26_Dic-26 compra Domingo R.xlsx",
-        "compra_fe": "Inventario_Total_Ene-26_Dic-26 compra Festivo R.xlsx",
-        "compra_nr": "Inventario_Total_Ene-26_Dic-26 compra NR.xlsx",
-        "venta": "Inventario_Total_Ene-26_Dic-26 venta.xlsx",
-    }
-
-    inventario: dict[str, pd.DataFrame] = {}
-    for clave, nombre_archivo in archivos.items():
-        ruta_archivo = base / nombre_archivo
-        if not ruta_archivo.exists():
-            raise FileNotFoundError(f"No se encontro el archivo: {ruta_archivo}")
-
-        df = pd.read_excel(ruta_archivo)
-        _validar_columnas_inventario(df, nombre_archivo)
-        inventario[clave] = df
-
-    return inventario
+    print(
+        "[portfolio] AVISO: cargar_inventario() está obsoleta. "
+        "La posición ahora se obtiene desde la API de Olibia vía olibia_loader."
+    )
+    return None
 
 
 def calcular_posicion_neta(
-    inventario: dict[str, pd.DataFrame],
+    inventario: pd.DataFrame | dict | None,
     fecha: str,
     fecha_tipo_dia: str | None = None,
 ) -> pd.DataFrame:
     """
     Calcula la posicion neta horaria para una fecha puntual.
 
+    Cuando inventario es un DataFrame proveniente de la API de Olibia
+    (columnas: date, hour, compra_r_kwh, compra_nr_kwh, venta_kwh,
+    posicion_neta_kwh), filtra las filas de esa fecha, renombra
+    'hour' → 'hora' y devuelve las 24 filas con columnas estándar.
+
+    Cuando inventario es None o un tipo no soportado, devuelve una
+    tabla de 24 filas con ceros (comportamiento seguro para simulaciones).
+
     Args:
-        inventario: Diccionario de inventarios de contratos.
-        fecha: Fecha para buscar el período en el inventario (YYYY-MM-DD).
-               Determina el mes/año del inventario a usar (ej. "2026-03-15" → "Mar-26").
-        fecha_tipo_dia: Fecha opcional para clasificar el tipo de día (ordinario/sábado/
-               festivo). Si se omite se usa la misma que `fecha`. Permite pasar una fecha
-               histórica real para obtener una mezcla realista de días laborables/festivos
-               mientras se busca en el inventario del año vigente.
-
-    Formula por hora:
-        compra_r = TO + inventario R segun tipo de dia
-        posicion_neta = compra_r + compra_nr - venta
+        inventario: DataFrame de posición (API Olibia), dict legado o None.
+        fecha: Fecha en formato YYYY-MM-DD.
+        fecha_tipo_dia: Ignorado; se conserva por compatibilidad de firma.
     """
-    fecha_obj = datetime.strptime(fecha, "%Y-%m-%d")
-    periodo = _periodo_desde_fecha(fecha_obj)
+    _COLUMNAS_POS = [
+        "hora", "compra_r_kwh", "compra_nr_kwh", "venta_kwh", "posicion_neta_kwh"
+    ]
 
-    # Clasificar el día usando fecha_tipo_dia si se provee (p.ej. fecha histórica de PB)
-    tipo_dia_obj = (
-        datetime.strptime(fecha_tipo_dia, "%Y-%m-%d") if fecha_tipo_dia else fecha_obj
-    )
-    tipo_dia = _tipo_dia(tipo_dia_obj)
+    def _ceros() -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "hora":             range(1, 25),
+                "compra_r_kwh":     0.0,
+                "compra_nr_kwh":    0.0,
+                "venta_kwh":        0.0,
+                "posicion_neta_kwh": 0.0,
+            }
+        )
 
-    if tipo_dia == "ordinario":
-        clave_tipo_dia = "compra_or"
-    elif tipo_dia == "sabado":
-        clave_tipo_dia = "compra_sa"
-    elif tipo_dia == "domingo":
-        clave_tipo_dia = "compra_do"
-    else:
-        clave_tipo_dia = "compra_fe"
+    # Camino API: inventario es DataFrame de cargar_posicion_olibia
+    if isinstance(inventario, pd.DataFrame):
+        # Acepta columna 'date' (API) o 'fecha' (ya renombrada)
+        col_fecha = "date" if "date" in inventario.columns else "fecha"
+        df_dia = inventario[inventario[col_fecha] == fecha].copy()
 
-    claves_requeridas = {
-        "compra_to",
-        "compra_nr",
-        "venta",
-        clave_tipo_dia,
-    }
-    faltantes = claves_requeridas - set(inventario.keys())
-    if faltantes:
-        raise ValueError(f"Faltan llaves en inventario: {sorted(faltantes)}")
+        if df_dia.empty:
+            return _ceros()
 
-    # Filtrar por mes (Periodo) en cada inventario relevante.
-    serie_to = _normalizar_serie_horaria(
-        inventario["compra_to"].loc[inventario["compra_to"]["Periodo"] == periodo],
-        "compra_to",
-    )
-    serie_r_tipo = _normalizar_serie_horaria(
-        inventario[clave_tipo_dia].loc[inventario[clave_tipo_dia]["Periodo"] == periodo],
-        clave_tipo_dia,
-    )
-    serie_nr = _normalizar_serie_horaria(
-        inventario["compra_nr"].loc[inventario["compra_nr"]["Periodo"] == periodo],
-        "compra_nr",
-    )
-    serie_venta = _normalizar_serie_horaria(
-        inventario["venta"].loc[inventario["venta"]["Periodo"] == periodo],
-        "venta",
-    )
+        # Normalizar nombre de la columna de hora
+        if "hour" in df_dia.columns:
+            df_dia = df_dia.rename(columns={"hour": "hora"})
 
-    compra_r = serie_to + serie_r_tipo
-    posicion_neta = compra_r + serie_nr - serie_venta
+        # Garantizar que todas las columnas esperadas existan
+        for col in _COLUMNAS_POS:
+            if col not in df_dia.columns:
+                df_dia[col] = 0.0
 
-    df_posicion = pd.DataFrame(
-        {
-            "hora": range(1, 25),
-            "compra_r_kwh": compra_r.values,
-            "compra_nr_kwh": serie_nr.values,
-            "venta_kwh": serie_venta.values,
-            "posicion_neta_kwh": posicion_neta.values,
-        }
-    )
+        return (
+            df_dia[_COLUMNAS_POS]
+            .sort_values("hora")
+            .reset_index(drop=True)
+        )
 
-    return df_posicion
+    # Camino legado / sin datos: devolver ceros
+    return _ceros()
 
 
 def calcular_posicion_periodo(
-    inventario: dict[str, pd.DataFrame],
+    inventario: pd.DataFrame | dict | None,
     fecha_inicio: str,
     fecha_fin: str,
 ) -> pd.DataFrame:
     """
     Calcula la posición neta horaria para un rango completo de fechas.
 
-    Para cada día real del período:
-      1. Determina el tipo de día (ordinario / sábado / domingo / festivo).
-      2. Obtiene la serie horaria de compra_r = TO[mes][hora] + tipo_día[mes][hora]
-         donde tipo_día es el inventario R que corresponde al día.
-      3. compra_nr = NR[mes][hora]
-      4. venta = venta[mes][hora]
-      5. posicion_neta = compra_r + compra_nr - venta
+    Obtiene los datos directamente desde la API de Olibia Energy usando
+    cargar_posicion_olibia() e inyecta la columna tipo_dia por cada fecha.
 
-    Los días fuera del período cubierto por los inventarios se omiten
-    silenciosamente (sin lanzar excepción).
+    El parámetro inventario se ignora; se conserva por compatibilidad de firma
+    con los endpoints existentes que pasaban el dict de Excel.
 
     Parámetros
     ----------
-    inventario   : diccionario devuelto por cargar_inventario().
+    inventario   : ignorado (puede ser None, dict o DataFrame).
     fecha_inicio : primer día del rango en formato YYYY-MM-DD (inclusive).
     fecha_fin    : último día del rango en formato YYYY-MM-DD (inclusive).
 
@@ -310,47 +271,44 @@ def calcular_posicion_periodo(
         venta_kwh, posicion_neta_kwh
     Ordenado por (fecha, hora). Vacío → lanza ValueError.
     """
-    desde = datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
-    hasta = datetime.strptime(fecha_fin, "%Y-%m-%d").date()
+    # Cargar posición desde la API de Olibia (paralelo, 8 workers)
+    df = cargar_posicion_olibia(fecha_inicio, fecha_fin)
 
-    fragmentos: list[pd.DataFrame] = []
-    dia_actual = desde
-
-    while dia_actual <= hasta:
-        fecha_str = dia_actual.isoformat()
-
-        # Calcular tipo_dia para anotarlo en el DataFrame resultante.
-        tipo_dia = _tipo_dia(datetime(dia_actual.year, dia_actual.month, dia_actual.day))
-
-        try:
-            # calcular_posicion_neta ya aplica TO + tipo_día internamente.
-            df_dia = calcular_posicion_neta(inventario, fecha_str)
-
-            # Agregar columnas de contexto al inicio del DataFrame.
-            df_dia.insert(0, "tipo_dia", tipo_dia)
-            df_dia.insert(0, "fecha", fecha_str)
-
-            fragmentos.append(df_dia)
-
-        except (ValueError, KeyError):
-            # Fecha fuera del período del inventario (ej. 2027 con Excel 2026).
-            pass
-
-        dia_actual += timedelta(days=1)
-
-    if not fragmentos:
+    if df.empty:
         raise ValueError(
-            f"No hay datos de inventario para el rango "
-            f"{fecha_inicio} a {fecha_fin}. "
-            "Verifica que los archivos de inventario cubran ese período."
+            f"No hay datos de posición para el rango {fecha_inicio} a {fecha_fin}. "
+            "Verifica la conexión con la API de Olibia y que los contratos "
+            "cubran ese período."
         )
 
-    df_resultado = (
-        pd.concat(fragmentos, ignore_index=True)
+    # Renombrar columnas al esquema estándar
+    df = df.rename(columns={"date": "fecha", "hour": "hora"})
+
+    # Calcular tipo_dia por fecha única y mapearlo al DataFrame
+    mapa_tipo_dia: dict[str, str] = {}
+    for fecha_str in df["fecha"].unique():
+        try:
+            fecha_obj = datetime.strptime(fecha_str, "%Y-%m-%d")
+            mapa_tipo_dia[fecha_str] = _tipo_dia(fecha_obj)
+        except ValueError:
+            mapa_tipo_dia[fecha_str] = "ordinario"
+
+    df.insert(2, "tipo_dia", df["fecha"].map(mapa_tipo_dia))
+
+    # Garantizar orden de columnas y que todas existan
+    columnas_orden = [
+        "fecha", "hora", "tipo_dia",
+        "compra_r_kwh", "compra_nr_kwh", "venta_kwh", "posicion_neta_kwh",
+    ]
+    for col in columnas_orden:
+        if col not in df.columns:
+            df[col] = 0.0
+
+    return (
+        df[columnas_orden]
         .sort_values(["fecha", "hora"])
         .reset_index(drop=True)
     )
-    return df_resultado
 
 
 def calcular_costo_bolsa(df_posicion: pd.DataFrame, df_pb_dia: pd.DataFrame) -> pd.DataFrame:

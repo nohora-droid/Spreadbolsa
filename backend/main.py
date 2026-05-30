@@ -11,7 +11,6 @@ from __future__ import annotations
 
 
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
 
 
@@ -23,9 +22,11 @@ import pandas as pd
 
 from dotenv import load_dotenv
 
+import concurrent.futures
+
 from spread_engine import calcular_spread, cargar_pb_sql
+from olibia_loader import cargar_posicion_olibia, get_contracts, get_contract_hourly
 from portfolio_engine import (
-    cargar_inventario,
     calcular_posicion_neta,
     calcular_posicion_periodo,
     calcular_costo_bolsa,
@@ -337,19 +338,9 @@ def portfolio_posicion(
             detail="fecha_inicio no puede ser posterior a fecha_fin.",
         )
 
-    # a) Cargar los 7 archivos de inventario Olibia una sola vez.
-    ruta_raiz = Path(__file__).parent.parent
+    # a) Calcular posición diaria/horaria desde la API de Olibia.
     try:
-        inventario = cargar_inventario(ruta_raiz)
-    except Exception as error:
-        raise HTTPException(
-            status_code=422,
-            detail=f"No fue posible cargar inventario: {error}",
-        ) from error
-
-    # b) Calcular posición diaria/horaria para todo el rango.
-    try:
-        df = calcular_posicion_periodo(inventario, fecha_inicio, fecha_fin)
+        df = calcular_posicion_periodo(None, fecha_inicio, fecha_fin)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except Exception as error:
@@ -446,14 +437,13 @@ def portfolio(
             detail="fecha_inicio no puede ser posterior a fecha_fin.",
         )
 
-    # a) Cargar inventario desde la carpeta raíz del proyecto (un nivel arriba de backend/).
-    ruta_raiz_proyecto = Path(__file__).parent.parent
+    # a) Cargar posición del portafolio desde la API de Olibia (paralelo).
     try:
-        inventario = cargar_inventario(ruta_raiz_proyecto)
+        df_inventario = cargar_posicion_olibia(fecha_inicio, fecha_fin)
     except Exception as error:
         raise HTTPException(
-            status_code=422,
-            detail=f"No fue posible cargar inventario: {error}",
+            status_code=502,
+            detail=f"Error consultando API Olibia para posición del portafolio: {error}",
         ) from error
 
     # b) Cargar PB desde Metabase usando SQL nativo.
@@ -481,8 +471,8 @@ def portfolio(
     fechas_unicas = sorted(df_pb["fecha"].dropna().unique().tolist())
 
     for fecha in fechas_unicas:
-        # Posición neta horaria según inventario y tipo de día.
-        df_posicion = calcular_posicion_neta(inventario, fecha)
+        # Posición neta horaria del día (filtra el DataFrame de la API Olibia).
+        df_posicion = calcular_posicion_neta(df_inventario, fecha)
 
         # Subconjunto PB del día para cruzar por hora.
         df_pb_dia = df_pb.loc[df_pb["fecha"] == fecha].copy()
@@ -624,14 +614,15 @@ def simulate(contrato: ContratoSimulacion):
             ),
         )
 
-    # Cargar inventario
-    ruta_raiz = Path(__file__).parent.parent
+    # Cargar posición del portafolio desde la API Olibia para el período del contrato
     try:
-        inventario = cargar_inventario(ruta_raiz)
+        inventario = cargar_posicion_olibia(
+            contrato.contrato_inicio, contrato.contrato_fin
+        )
     except Exception as error:
         raise HTTPException(
-            status_code=422,
-            detail=f"No fue posible cargar inventario: {error}",
+            status_code=502,
+            detail=f"Error consultando API Olibia para posición del portafolio: {error}",
         ) from error
 
     # Cargar precios de bolsa para el período del ESCENARIO (pb_desde → pb_hasta)
@@ -692,3 +683,113 @@ def simulate(contrato: ContratoSimulacion):
         ) from error
 
     return resultado
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Listado de contratos activos desde Olibia Energy
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/contratos")
+def listar_contratos(
+    start_date: str = Query(
+        ...,
+        description="Fecha inicio del período (YYYY-MM-DD, inclusive).",
+    ),
+    end_date: str = Query(
+        ...,
+        description="Fecha fin del período (YYYY-MM-DD, inclusive).",
+    ),
+):
+    """
+    Retorna la lista de contratos validados de Olibia Energy activos en el
+    período indicado, con métricas de energía y precio promedio ponderado.
+
+    Para cada contrato de modalidad PC (Precio Constante) se calcula el PPP:
+        PPP = Σ(qty_abs × fixed_price) / Σ(qty_abs)
+
+    Para contratos PLD (precio = bolsa) el campo precio_promedio_cop_kwh
+    es null (el precio depende de la bolsa en cada hora).
+    """
+    _validar_fecha_iso(start_date, "start_date")
+    _validar_fecha_iso(end_date, "end_date")
+    if start_date > end_date:
+        raise HTTPException(
+            status_code=400,
+            detail="start_date no puede ser posterior a end_date.",
+        )
+
+    # a) Obtener lista de contratos validados desde Olibia
+    try:
+        todos = get_contracts()
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Error consultando contratos en Olibia: {error}",
+        ) from error
+
+    # Filtrar solo los activos en el período solicitado
+    contratos_activos = [
+        c for c in todos
+        if c["start_date"] <= end_date and c["end_date"] >= start_date
+    ]
+
+    # b) Cargar datos horarios de cada contrato en paralelo para calcular métricas
+    def _cargar_metricas(contrato: dict) -> dict:
+        """
+        Carga datos horarios de un contrato y calcula:
+          - energia_total_kwh: suma de |quantity| en el período
+          - precio_promedio_cop_kwh: PPP para contratos PC; None para PLD
+        """
+        try:
+            df = get_contract_hourly(contrato["id"], start_date, end_date)
+
+            energia_kwh = float(df["quantity"].abs().sum()) if not df.empty else 0.0
+
+            precio_ppp = None
+            if contrato.get("modalidad") == "PC" and not df.empty:
+                df_pc = df[
+                    df["fixed_price"].notna() & (df["quantity"].abs() > 0)
+                ].copy()
+                if not df_pc.empty:
+                    total_qty = df_pc["quantity"].abs().sum()
+                    total_cop = (df_pc["quantity"].abs() * df_pc["fixed_price"]).sum()
+                    precio_ppp = round(float(total_cop / total_qty), 4) if total_qty > 0 else None
+
+            return {
+                "id":                      contrato["id"],
+                "nombre":                  contrato["contract_number"],
+                "operacion":               contrato["operation"],
+                "mercado":                 contrato["market_type"],
+                "modalidad":               contrato.get("modalidad", ""),
+                "energia_total_kwh":       round(energia_kwh, 2),
+                "precio_promedio_cop_kwh": precio_ppp,
+                "vigencia":                f"{contrato['start_date']}..{contrato['end_date']}",
+            }
+
+        except Exception as exc:
+            # Devolver el contrato con error anotado para no bloquear la respuesta
+            print(f"[/contratos] Error cargando {contrato['contract_number']}: {exc}")
+            return {
+                "id":                      contrato["id"],
+                "nombre":                  contrato["contract_number"],
+                "operacion":               contrato["operation"],
+                "mercado":                 contrato["market_type"],
+                "modalidad":               contrato.get("modalidad", ""),
+                "energia_total_kwh":       None,
+                "precio_promedio_cop_kwh": None,
+                "vigencia":                f"{contrato['start_date']}..{contrato['end_date']}",
+                "error":                   str(exc),
+            }
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futuros = {pool.submit(_cargar_metricas, c): c for c in contratos_activos}
+        resultados = [futuro.result() for futuro in concurrent.futures.as_completed(futuros)]
+
+    # Ordenar por operación, mercado y nombre para presentación consistente
+    resultados.sort(key=lambda x: (x["operacion"], x["mercado"], x["nombre"]))
+
+    return {
+        "contratos": resultados,
+        "total":     len(resultados),
+        "periodo":   f"{start_date} a {end_date}",
+    }
