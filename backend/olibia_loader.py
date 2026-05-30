@@ -22,6 +22,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -48,6 +49,93 @@ _MAX_WORKERS = 8
 
 # Timeout en segundos por petición HTTP a la API de Olibia
 _TIMEOUT = 30
+
+
+# ─── Festivos colombianos (para clasificar tipo de día de la demanda) ─────────
+# Se usan en cargar_posicion_con_demanda para saber qué columna de la card
+# de Metabase aplicar: demanda_*_ordinario | _sabado | _festivo.
+# Domingo se agrupa con festivo (no hay columna separada en las cards).
+
+def _siguiente_lunes(fecha_base: date) -> date:
+    """Aplica Ley Emiliani: desplaza algunas festividades al lunes siguiente."""
+    dias_hasta_lunes = (7 - fecha_base.weekday()) % 7
+    return fecha_base + timedelta(days=dias_hasta_lunes)
+
+
+def _fecha_pascua(anio: int) -> date:
+    """Calcula el domingo de Pascua usando el algoritmo de Meeus (gregoriano)."""
+    a = anio % 19
+    b = anio // 100
+    c = anio % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    mes = (h + l - 7 * m + 114) // 31
+    dia = ((h + l - 7 * m + 114) % 31) + 1
+    return date(anio, mes, dia)
+
+
+def _festivos_colombia(anio: int) -> set[date]:
+    """Retorna el conjunto de fechas festivas en Colombia para el año dado."""
+    pascua = _fecha_pascua(anio)
+
+    # Festivos de fecha fija
+    festivos: set[date] = {
+        date(anio,  1,  1),   # Año Nuevo
+        date(anio,  5,  1),   # Día del Trabajo
+        date(anio,  7, 20),   # Independencia
+        date(anio,  8,  7),   # Batalla de Boyacá
+        date(anio, 12,  8),   # Inmaculada Concepción
+        date(anio, 12, 25),   # Navidad
+    }
+
+    # Festivos con traslado al lunes (Ley Emiliani)
+    emiliani = [
+        date(anio,  1,  6),   # Reyes Magos
+        date(anio,  3, 19),   # San José
+        date(anio,  6, 29),   # San Pedro y San Pablo
+        date(anio,  8, 15),   # Asunción
+        date(anio, 10, 12),   # Día de la Raza
+        date(anio, 11,  1),   # Todos los Santos
+        date(anio, 11, 11),   # Independencia de Cartagena
+    ]
+    festivos.update(_siguiente_lunes(f) for f in emiliani)
+
+    # Festivos móviles respecto a Pascua
+    festivos.add(pascua - timedelta(days=3))                         # Jueves Santo
+    festivos.add(pascua - timedelta(days=2))                         # Viernes Santo
+    festivos.add(_siguiente_lunes(pascua + timedelta(days=43)))      # Ascensión
+    festivos.add(_siguiente_lunes(pascua + timedelta(days=64)))      # Corpus Christi
+    festivos.add(_siguiente_lunes(pascua + timedelta(days=71)))      # Sagrado Corazón
+
+    return festivos
+
+
+def _tipo_dia(fecha_obj: datetime) -> str:
+    """
+    Clasifica una fecha como ordinario, sabado, domingo o festivo.
+
+    Devuelve:
+        "ordinario" → lunes a viernes no festivos
+        "sabado"    → sábados
+        "domingo"   → domingos (sin festivo)
+        "festivo"   → festivos colombianos (cualquier día de la semana)
+    """
+    fecha_d = fecha_obj.date()
+    if fecha_d in _festivos_colombia(fecha_obj.year):
+        return "festivo"
+    dia_semana = fecha_obj.weekday()   # lunes=0 … domingo=6
+    if dia_semana == 5:
+        return "sabado"
+    if dia_semana == 6:
+        return "domingo"
+    return "ordinario"
 
 
 # ─── Utilidades internas ──────────────────────────────────────────────────────
@@ -529,76 +617,129 @@ def get_precios_contratos(start_date: str, end_date: str) -> pd.DataFrame:
 
 def cargar_posicion_con_demanda(start_date: str, end_date: str) -> pd.DataFrame:
     """
-    Carga la posición de contratos Olibia más la demanda real de clientes.
+    Calcula la posición energética neta incorporando la demanda de usuarios finales.
 
-    Combina dos fuentes:
-        - Energía de contratos Olibia (compra R, compra NR, venta) via API.
-        - Demanda regulada   (card Metabase 9440, formato ancho H1..H24).
-        - Demanda no regulada(card Metabase 9439, formato ancho H1..H24).
+    Combina la posición de contratos Olibia (API) con la demanda promedio
+    horaria por tipo de día almacenada en las cards de Metabase.
 
-    La demanda representa la energía que los clientes de BIA efectivamente
-    consumieron; se trata como una "salida" adicional que reduce el excedente
-    en bolsa.
+    Estructura de las cards:
+        Card 9440 — demanda regulada (una fila por hora 1-24):
+            hour | demanda_r_ordinario | demanda_r_sabado | demanda_r_festivo
+        Card 9439 — demanda no regulada (una fila por hora 1-24):
+            hour | demanda_nr_ordinario | demanda_nr_sabado | demanda_nr_festivo
 
-    Fórmula posición neta total:
-        posicion_neta_total = compra_r + compra_nr − venta
-                              − demanda_r − demanda_nr
+    Las cards contienen valores PROMEDIO en kWh por hora y tipo de día.
+    Para asignar la demanda correcta a cada fila (fecha, hora) del período:
+        1. Se clasifica la fecha: ordinario | sabado | domingo | festivo.
+           (domingo se mapea a la columna "festivo" de las cards, que
+           no tiene columna propia.)
+        2. Se consulta la tabla de lookup:
+               demanda_r  = card9440[tipo_dia][hora]
+               demanda_nr = card9439[tipo_dia][hora]
+
+    Fórmula de posición neta (actualizada):
+        posicion_neta_kwh = compra_r + compra_nr − venta
+                            − demanda_r − demanda_nr
 
     Parámetros:
-        start_date : Fecha inicio YYYY-MM-DD.
-        end_date   : Fecha fin YYYY-MM-DD.
+        start_date : Fecha inicio YYYY-MM-DD (inclusive).
+        end_date   : Fecha fin YYYY-MM-DD (inclusive).
 
     Retorna DataFrame con columnas:
-        date, hour,
+        date, hour, tipo_dia,
         compra_r_kwh, compra_nr_kwh, venta_kwh,
-        posicion_neta_kwh,           ← solo contratos (sin demanda)
         demanda_r_kwh, demanda_nr_kwh,
-        posicion_neta_total_kwh      ← contratos menos demanda real
+        posicion_neta_kwh   ← contratos menos demanda de usuarios finales
 
-    Si no se puede cargar la demanda de Metabase, se usan ceros
-    y se registra un warning en consola.
+    Si Metabase no está disponible se asignan ceros a las columnas de
+    demanda y se registra un aviso en consola.
     """
-    # 1. Posición de contratos desde la API de Olibia
+    # ── 1. Posición de contratos desde la API de Olibia ───────────────────────
     df_pos = cargar_posicion_olibia(start_date, end_date)
 
-    # 2. Demanda desde Metabase (formato ancho H1..H24 → largo date/hour)
+    # ── 2. Clasificar tipo_dia por cada fecha única del período ───────────────
+    # ordinario / sabado / domingo / festivo según calendario colombiano.
+    # Se calcula aquí porque determina qué columna de la card de Metabase usar.
+    tipo_dia_map: dict[str, str] = {}
+    for fecha_str in df_pos["date"].unique():
+        try:
+            tipo_dia_map[fecha_str] = _tipo_dia(datetime.strptime(fecha_str, "%Y-%m-%d"))
+        except ValueError:
+            tipo_dia_map[fecha_str] = "ordinario"
+
+    df_pos["tipo_dia"] = df_pos["date"].map(tipo_dia_map)
+
+    # ── 3. Cargar y aplicar demanda desde Metabase ────────────────────────────
     try:
-        from data_loader import load_metabase_card_rango
+        from data_loader import load_metabase_card
 
-        # Card 9440: demanda regulada horaria
-        df_dr_ancho  = load_metabase_card_rango(_CARD_DEMANDA_R,  start_date, end_date)
-        # Card 9439: demanda no regulada horaria
-        df_dnr_ancho = load_metabase_card_rango(_CARD_DEMANDA_NR, start_date, end_date)
+        # Card 9440: demanda regulada — filas por hora, columnas por tipo de día
+        df_dr  = load_metabase_card(_CARD_DEMANDA_R)
+        # Card 9439: demanda no regulada — misma estructura
+        df_dnr = load_metabase_card(_CARD_DEMANDA_NR)
 
-        df_dr  = _ancho_a_largo(df_dr_ancho,  "demanda_r_kwh")
-        df_dnr = _ancho_a_largo(df_dnr_ancho, "demanda_nr_kwh")
+        # Normalizar columna de hora a entero
+        df_dr["hour"]  = pd.to_numeric(df_dr["hour"],  errors="coerce").astype(int)
+        df_dnr["hour"] = pd.to_numeric(df_dnr["hour"], errors="coerce").astype(int)
 
-        if not df_dr.empty:
-            df_pos = df_pos.merge(df_dr,  on=["date", "hour"], how="left")
-        if not df_dnr.empty:
-            df_pos = df_pos.merge(df_dnr, on=["date", "hour"], how="left")
+        # Normalizar columnas de kWh a float (algunos valores pueden venir como str)
+        for col in ["demanda_r_ordinario", "demanda_r_sabado", "demanda_r_festivo"]:
+            df_dr[col] = pd.to_numeric(df_dr[col], errors="coerce").fillna(0.0)
+        for col in ["demanda_nr_ordinario", "demanda_nr_sabado", "demanda_nr_festivo"]:
+            df_dnr[col] = pd.to_numeric(df_dnr[col], errors="coerce").fillna(0.0)
+
+        # Construir tabla de lookup: (tipo_dia, hora) → kWh
+        # domingo se mapea a la columna "festivo" (no existe columna separada)
+        lookup_r: dict[tuple[str, int], float] = {}
+        for _, fila in df_dr.iterrows():
+            h = int(fila["hour"])
+            lookup_r[("ordinario", h)] = float(fila["demanda_r_ordinario"])
+            lookup_r[("sabado",    h)] = float(fila["demanda_r_sabado"])
+            lookup_r[("domingo",   h)] = float(fila["demanda_r_festivo"])   # sin col propia → festivo
+            lookup_r[("festivo",   h)] = float(fila["demanda_r_festivo"])
+
+        lookup_nr: dict[tuple[str, int], float] = {}
+        for _, fila in df_dnr.iterrows():
+            h = int(fila["hour"])
+            lookup_nr[("ordinario", h)] = float(fila["demanda_nr_ordinario"])
+            lookup_nr[("sabado",    h)] = float(fila["demanda_nr_sabado"])
+            lookup_nr[("domingo",   h)] = float(fila["demanda_nr_festivo"])  # sin col propia → festivo
+            lookup_nr[("festivo",   h)] = float(fila["demanda_nr_festivo"])
+
+        # Asignar demanda por fila según (tipo_dia, hora)
+        tipo_dia_vec = df_pos["tipo_dia"].tolist()
+        hora_vec     = df_pos["hour"].tolist()
+
+        df_pos["demanda_r_kwh"] = [
+            lookup_r.get((td, int(h)), 0.0)
+            for td, h in zip(tipo_dia_vec, hora_vec)
+        ]
+        df_pos["demanda_nr_kwh"] = [
+            lookup_nr.get((td, int(h)), 0.0)
+            for td, h in zip(tipo_dia_vec, hora_vec)
+        ]
 
         print(
             f"[olibia] Demanda cargada desde Metabase "
-            f"({start_date} a {end_date})"
+            f"(cards {_CARD_DEMANDA_R}/{_CARD_DEMANDA_NR}, "
+            f"{start_date} a {end_date})"
         )
 
     except Exception as exc:
         print(
             f"[olibia] No se pudo cargar demanda de Metabase: {exc}. "
-            "Se usarán ceros para demanda_r_kwh y demanda_nr_kwh."
+            "Se asignan ceros a demanda_r_kwh y demanda_nr_kwh."
         )
+        df_pos["demanda_r_kwh"]  = 0.0
+        df_pos["demanda_nr_kwh"] = 0.0
 
-    # Asegurar columnas de demanda — ceros donde Metabase no tenga datos
-    for col in ("demanda_r_kwh", "demanda_nr_kwh"):
-        if col not in df_pos.columns:
-            df_pos[col] = 0.0
-        else:
-            df_pos[col] = df_pos[col].fillna(0.0)
-
-    # 3. Posición neta total = contratos − demanda real
-    df_pos["posicion_neta_total_kwh"] = (
-        df_pos["posicion_neta_kwh"]
+    # ── 4. Recalcular posicion_neta incluyendo demanda de usuarios finales ─────
+    # Fórmula: contratos (compra − venta) menos lo que efectivamente consumen
+    # los clientes, que representa energía ya comprometida a ellos (no en bolsa).
+    df_pos["posicion_neta_kwh"] = (
+        df_pos["compra_r_kwh"]
+        + df_pos["compra_nr_kwh"]
+        - df_pos["venta_kwh"]
         - df_pos["demanda_r_kwh"]
         - df_pos["demanda_nr_kwh"]
     )

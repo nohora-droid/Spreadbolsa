@@ -25,10 +25,14 @@ from dotenv import load_dotenv
 import concurrent.futures
 
 from spread_engine import calcular_spread, cargar_pb_sql
-from olibia_loader import cargar_posicion_olibia, get_contracts, get_contract_hourly
+from olibia_loader import (
+    cargar_posicion_olibia,
+    cargar_posicion_con_demanda,
+    get_contracts,
+    get_contract_hourly,
+)
 from portfolio_engine import (
     calcular_posicion_neta,
-    calcular_posicion_periodo,
     calcular_costo_bolsa,
     resumen_portafolio,
 )
@@ -314,21 +318,24 @@ def portfolio_posicion(
     ),
 ):
     """
-    Calcula la posición energética del portafolio Olibia SIN precio de bolsa.
+    Calcula la posición energética del portafolio Olibia incluyendo demanda.
 
-    Usa calcular_posicion_periodo() del motor:
-      - Itera cada día real del rango.
-      - Para cada día determina el tipo_dia (ordinario/sábado/domingo/festivo).
-      - Aplica compra_r = TO[mes][hora] + inventario_tipo_dia[mes][hora].
-      - Suma compra_nr = NR[mes][hora] y descuenta venta = venta[mes][hora].
+    Fuentes de datos:
+      - Contratos: API Olibia Energy (compra R, compra NR, venta).
+      - Demanda de clientes: Metabase cards 9440 (regulada) y 9439 (no regulada),
+        promediadas por hora y tipo de día, asignadas según el tipo_dia real
+        de cada fecha (ordinario / sábado / domingo / festivo).
+
+    Fórmula posición neta:
+      posicion_neta_kwh = compra_r + compra_nr − venta − demanda_r − demanda_nr
 
     Retorna (todo en kWh, sin precios):
-      datos              : filas horarias  {fecha, hora, tipo_dia,
+      datos              : filas horarias con {fecha, hora, tipo_dia,
                            compra_r_kwh, compra_nr_kwh, venta_kwh,
-                           posicion_neta_kwh}
-      resumen_mensual    : agregados mensuales en MWh + nro días
-      total_dias         : entero con total de días procesados
-      distribucion_tipo_dia : conteo por tipo (ordinarios/sabados/domingos/festivos)
+                           demanda_r_kwh, demanda_nr_kwh, posicion_neta_kwh}
+      resumen_mensual    : agregados mensuales en MWh + número de días
+      total_dias         : total de días procesados
+      distribucion_tipo_dia : conteo de días por tipo
     """
     _validar_fecha_iso(fecha_inicio, "fecha_inicio")
     _validar_fecha_iso(fecha_fin, "fecha_fin")
@@ -338,27 +345,39 @@ def portfolio_posicion(
             detail="fecha_inicio no puede ser posterior a fecha_fin.",
         )
 
-    # a) Calcular posición diaria/horaria desde la API de Olibia.
+    # a) Cargar posición de contratos + demanda de clientes desde Olibia y Metabase.
     try:
-        df = calcular_posicion_periodo(None, fecha_inicio, fecha_fin)
-    except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
+        df_raw = cargar_posicion_con_demanda(fecha_inicio, fecha_fin)
     except Exception as error:
         raise HTTPException(
             status_code=500,
             detail=f"Error calculando posición del portafolio: {error}",
         ) from error
 
+    if df_raw.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No hay datos de posición para el rango "
+                f"{fecha_inicio} a {fecha_fin}."
+            ),
+        )
+
+    # b) Renombrar columnas al esquema del endpoint (date → fecha, hour → hora).
+    df = df_raw.rename(columns={"date": "fecha", "hour": "hora"})
+
     # c) Serializar filas horarias completas.
     datos = [
         {
-            "fecha":              str(fila["fecha"]),
-            "hora":               int(fila["hora"]),
-            "tipo_dia":           str(fila["tipo_dia"]),
-            "compra_r_kwh":       float(fila["compra_r_kwh"]),
-            "compra_nr_kwh":      float(fila["compra_nr_kwh"]),
-            "venta_kwh":          float(fila["venta_kwh"]),
-            "posicion_neta_kwh":  float(fila["posicion_neta_kwh"]),
+            "fecha":           str(fila["fecha"]),
+            "hora":            int(fila["hora"]),
+            "tipo_dia":        str(fila["tipo_dia"]),
+            "compra_r_kwh":    float(fila["compra_r_kwh"]),
+            "compra_nr_kwh":   float(fila["compra_nr_kwh"]),
+            "venta_kwh":       float(fila["venta_kwh"]),
+            "demanda_r_kwh":   float(fila["demanda_r_kwh"]),
+            "demanda_nr_kwh":  float(fila["demanda_nr_kwh"]),
+            "posicion_neta_kwh": float(fila["posicion_neta_kwh"]),
         }
         for fila in df.to_dict(orient="records")
     ]
@@ -366,10 +385,12 @@ def portfolio_posicion(
     # d) Resumen mensual: sumar kWh por mes y contar días únicos.
     df["mes"] = df["fecha"].str[:7]
 
+    columnas_agg = [
+        "compra_r_kwh", "compra_nr_kwh", "venta_kwh",
+        "demanda_r_kwh", "demanda_nr_kwh", "posicion_neta_kwh",
+    ]
     agg_kwh = (
-        df.groupby("mes")[
-            ["compra_r_kwh", "compra_nr_kwh", "venta_kwh", "posicion_neta_kwh"]
-        ]
+        df.groupby("mes")[columnas_agg]
         .sum()
         .reset_index()
     )
@@ -383,12 +404,14 @@ def portfolio_posicion(
 
     resumen_mensual = [
         {
-            "mes":                str(fila["mes"]),
-            "compra_r_mwh":       round(float(fila["compra_r_kwh"])      / 1_000, 3),
-            "compra_nr_mwh":      round(float(fila["compra_nr_kwh"])     / 1_000, 3),
-            "venta_mwh":          round(float(fila["venta_kwh"])         / 1_000, 3),
-            "posicion_neta_mwh":  round(float(fila["posicion_neta_kwh"]) / 1_000, 3),
-            "dias":               int(fila["dias"]),
+            "mes":               str(fila["mes"]),
+            "compra_r_mwh":      round(float(fila["compra_r_kwh"])       / 1_000, 3),
+            "compra_nr_mwh":     round(float(fila["compra_nr_kwh"])      / 1_000, 3),
+            "venta_mwh":         round(float(fila["venta_kwh"])          / 1_000, 3),
+            "demanda_r_mwh":     round(float(fila["demanda_r_kwh"])      / 1_000, 3),
+            "demanda_nr_mwh":    round(float(fila["demanda_nr_kwh"])     / 1_000, 3),
+            "posicion_neta_mwh": round(float(fila["posicion_neta_kwh"])  / 1_000, 3),
+            "dias":              int(fila["dias"]),
         }
         for fila in resumen_df.to_dict(orient="records")
     ]
@@ -407,9 +430,9 @@ def portfolio_posicion(
     }
 
     return {
-        "datos":                datos,
-        "resumen_mensual":      resumen_mensual,
-        "total_dias":           int(df["fecha"].nunique()),
+        "datos":                 datos,
+        "resumen_mensual":       resumen_mensual,
+        "total_dias":            int(df["fecha"].nunique()),
         "distribucion_tipo_dia": distribucion_tipo_dia,
     }
 
