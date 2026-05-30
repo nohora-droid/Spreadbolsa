@@ -510,49 +510,58 @@ def cargar_posicion_olibia(start_date: str, end_date: str) -> pd.DataFrame:
 # FUNCIÓN 4 — Precio promedio ponderado de contratos PC
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def get_precios_contratos(start_date: str, end_date: str) -> pd.DataFrame:
+def get_precios_contratos(start_date: str, end_date: str) -> dict:
     """
-    Calcula el precio promedio ponderado (PPP) por hora de contratos PC.
+    Calcula el PPP (Precio Promedio Ponderado) de contratos PC por categoría.
 
-    Solo considera contratos con modalidad "PC" (Precio Constante), que
-    tienen el campo fixed_price definido en la API. Los contratos PLD
-    se excluyen porque su precio es el de la bolsa (no un precio pactado).
+    Solo considera contratos con modalidad "PC" (Precio Constante), que tienen
+    el campo fixed_price definido en la API. Los contratos PLD se excluyen
+    porque su precio efectivo es el de la bolsa en cada hora (sin precio pactado).
 
-    Fórmula PPP por (date, hour, operation, market_type):
+    Tipo del PPP por categoría:
+      "Indexado"   → todos los datos tienen is_projected_data=False
+                     (precios históricos confirmados, ya ajustados por IPP)
+      "Proyectado" → algún dato tiene is_projected_data=True
+                     (hay al menos una hora futura proyectada)
+      "Sin datos"  → no hay contratos PC activos en esa categoría en el período
+
+    Fórmula PPP por categoría:
         PPP = Σ(|quantity| × fixed_price) / Σ(|quantity|)
 
     Parámetros:
-        start_date : Fecha inicio YYYY-MM-DD.
-        end_date   : Fecha fin YYYY-MM-DD.
+        start_date : Fecha inicio YYYY-MM-DD (inclusive).
+        end_date   : Fecha fin YYYY-MM-DD (inclusive).
 
-    Retorna DataFrame con columnas:
-        date                            : YYYY-MM-DD
-        hour                            : entero 1-24
-        operation                       : "Compra" | "Venta"
-        market_type                     : "REGULADO" | "NO REGULADO"
-        precio_promedio_ponderado_cop_kwh : PPP en COP/kWh (4 decimales)
-
-    Los contratos PLD (sin fixed_price) no aportan al cálculo.
-    Horas sin contratos PC activos no aparecen en el resultado.
+    Retorna:
+        {
+            "compra_r":      {"ppp": float | None, "tipo": str},
+            "compra_nr":     {"ppp": float | None, "tipo": str},
+            "venta":         {"ppp": float | None, "tipo": str},
+            "pld_excluidos": int,   # contratos PLD no incluidos en el cálculo
+            "contratos_pc":  int,   # contratos PC incluidos en el cálculo
+        }
     """
     contratos = get_contracts()
 
-    # Filtrar solo contratos PC activos en el período solicitado
-    contratos_pc = [
+    # Separar contratos activos en el período en PC y PLD
+    contratos_activos = [
         c for c in contratos
-        if c.get("modalidad") == "PC"
-        and c["start_date"] <= end_date
-        and c["end_date"] >= start_date
+        if c["start_date"] <= end_date and c["end_date"] >= start_date
     ]
-    print(f"[olibia] Contratos PC para precios: {len(contratos_pc)}")
+    contratos_pc = [c for c in contratos_activos if c.get("modalidad") == "PC"]
+    n_pld        = len(contratos_activos) - len(contratos_pc)
 
-    if not contratos_pc:
-        return pd.DataFrame(columns=[
-            "date", "hour", "operation", "market_type",
-            "precio_promedio_ponderado_cop_kwh",
-        ])
+    print(
+        f"[olibia] PPP — contratos PC: {len(contratos_pc)}, "
+        f"PLD excluidos: {n_pld}"
+    )
 
-    fragmentos: list[pd.DataFrame] = []
+    # Acumuladores por categoría de operación
+    acum: dict[str, dict] = {
+        "compra_r":  {"qty": 0.0, "cop": 0.0, "proyectado": False, "tiene_datos": False},
+        "compra_nr": {"qty": 0.0, "cop": 0.0, "proyectado": False, "tiene_datos": False},
+        "venta":     {"qty": 0.0, "cop": 0.0, "proyectado": False, "tiene_datos": False},
+    }
 
     for contrato in contratos_pc:
         try:
@@ -560,55 +569,63 @@ def get_precios_contratos(start_date: str, end_date: str) -> pd.DataFrame:
             if df.empty:
                 continue
 
-            # Solo filas con precio definido y cantidad distinta de cero
-            df_pc = df[df["fixed_price"].notna() & (df["quantity"].abs() > 0)].copy()
+            # Solo filas con precio fijo definido y cantidad distinta de cero
+            df_pc = df[
+                df["fixed_price"].notna() & (df["quantity"].abs() > 0)
+            ].copy()
             if df_pc.empty:
                 continue
 
-            df_pc["operation"]    = contrato["operation"]
-            df_pc["market_type"]  = contrato["market_type"]
-            df_pc["qty_abs"]      = df_pc["quantity"].abs()
-            df_pc["qty_x_precio"] = df_pc["qty_abs"] * df_pc["fixed_price"]
+            # Determinar categoría según operación y mercado
+            operacion = contrato["operation"]    # "Compra" | "Venta"
+            mercado   = contrato["market_type"]  # "REGULADO" | "NO REGULADO"
+            if operacion == "Compra" and mercado == "REGULADO":
+                clave = "compra_r"
+            elif operacion == "Compra" and mercado == "NO REGULADO":
+                clave = "compra_nr"
+            else:
+                clave = "venta"
 
-            fragmentos.append(
-                df_pc[[
-                    "date", "hour", "operation", "market_type",
-                    "qty_abs", "qty_x_precio",
-                ]]
-            )
+            # Acumular energía y COP ponderados
+            qty_abs = df_pc["quantity"].abs()
+            acum[clave]["qty"] += float(qty_abs.sum())
+            acum[clave]["cop"] += float((qty_abs * df_pc["fixed_price"]).sum())
+            acum[clave]["tiene_datos"] = True
+
+            # Si alguna fila tiene datos proyectados, marcar la categoría
+            if df_pc["is_projected_data"].any():
+                acum[clave]["proyectado"] = True
 
         except Exception as exc:
             print(
-                f"[olibia] Error en precios de "
-                f"{contrato['contract_number']}: {exc}"
+                f"[olibia] Error en PPP de {contrato['contract_number']}: {exc}"
             )
 
-    if not fragmentos:
-        return pd.DataFrame(columns=[
-            "date", "hour", "operation", "market_type",
-            "precio_promedio_ponderado_cop_kwh",
-        ])
+    def _categoria(clave: str) -> dict:
+        """Calcula PPP y tipo para una categoría de operación."""
+        a = acum[clave]
+        if not a["tiene_datos"] or a["qty"] == 0.0:
+            return {"ppp": None, "tipo": "Sin datos"}
+        return {
+            "ppp":  round(a["cop"] / a["qty"], 4),
+            "tipo": "Proyectado" if a["proyectado"] else "Indexado",
+        }
 
-    df_all = pd.concat(fragmentos, ignore_index=True)
+    resultado = {
+        "compra_r":      _categoria("compra_r"),
+        "compra_nr":     _categoria("compra_nr"),
+        "venta":         _categoria("venta"),
+        "pld_excluidos": n_pld,
+        "contratos_pc":  len(contratos_pc),
+    }
 
-    # PPP por (date, hour, operation, market_type)
-    agg = (
-        df_all
-        .groupby(["date", "hour", "operation", "market_type"])
-        .agg(
-            total_kwh =("qty_abs",      "sum"),
-            total_cop =("qty_x_precio", "sum"),
-        )
-        .reset_index()
+    print(
+        f"[olibia] PPP — "
+        f"Compra R: {resultado['compra_r']['ppp']} ({resultado['compra_r']['tipo']})  "
+        f"Compra NR: {resultado['compra_nr']['ppp']} ({resultado['compra_nr']['tipo']})  "
+        f"Venta: {resultado['venta']['ppp']} ({resultado['venta']['tipo']})"
     )
-    agg["precio_promedio_ponderado_cop_kwh"] = (
-        agg["total_cop"] / agg["total_kwh"]
-    ).round(4)
-
-    return agg[[
-        "date", "hour", "operation", "market_type",
-        "precio_promedio_ponderado_cop_kwh",
-    ]]
+    return resultado
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

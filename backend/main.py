@@ -30,6 +30,7 @@ from olibia_loader import (
     cargar_posicion_con_demanda,
     get_contracts,
     get_contract_hourly,
+    get_precios_contratos,
 )
 from portfolio_engine import (
     calcular_posicion_neta,
@@ -670,6 +671,19 @@ def simulate(contrato: ContratoSimulacion):
             ),
         )
 
+    # Obtener PPP real de contratos PC para el período del contrato
+    # (no bloquea si falla — se devuelve None y el frontend usa mock)
+    ppp_resumen = None
+    try:
+        ppp_resumen = get_precios_contratos(
+            contrato.contrato_inicio, contrato.contrato_fin
+        )
+    except Exception as ppp_error:
+        print(
+            f"[/simulate] No se pudo obtener PPP de contratos: {ppp_error}. "
+            "Se omite del resultado."
+        )
+
     # Ejecutar simulación
     try:
         # Convertir bloques Pydantic → dicts simples para el engine
@@ -693,6 +707,7 @@ def simulate(contrato: ContratoSimulacion):
             bloques=bloques_dict,
             perfil_pesos_24h=contrato.perfil_pesos_24h,
             perfil_excel_12x24=contrato.perfil_excel_12x24,
+            ppp_resumen=ppp_resumen,
         )
     except ValueError as error:
         raise HTTPException(
@@ -816,3 +831,58 @@ def listar_contratos(
         "total":     len(resultados),
         "periodo":   f"{start_date} a {end_date}",
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PPP (Precio Promedio Ponderado) de contratos PC por categoría
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/contratos/ppp")
+def contratos_ppp(
+    start_date: str = Query(
+        ...,
+        description="Fecha inicio del período (YYYY-MM-DD, inclusive).",
+    ),
+    end_date: str = Query(
+        ...,
+        description="Fecha fin del período (YYYY-MM-DD, inclusive).",
+    ),
+):
+    """
+    Retorna el PPP (Precio Promedio Ponderado) de contratos PC de Olibia
+    por categoría de operación: compra regulada, compra no regulada y venta.
+
+    Solo considera contratos con modalidad PC (Precio Constante); los contratos
+    PLD se excluyen porque su precio efectivo es el de la bolsa.
+
+    Fórmula PPP:  Σ(|energía| × fixed_price) / Σ(|energía|)
+
+    Tipo del PPP:
+      "Indexado"   → todos los datos son históricos confirmados (is_projected_data=False)
+      "Proyectado" → algún dato es proyección futura (is_projected_data=True)
+      "Sin datos"  → no hay contratos PC activos en esa categoría en el período
+
+    Retorna:
+        {
+          "compra_r":      {"ppp": float | null, "tipo": str},
+          "compra_nr":     {"ppp": float | null, "tipo": str},
+          "venta":         {"ppp": float | null, "tipo": str},
+          "pld_excluidos": int,
+          "contratos_pc":  int,
+        }
+    """
+    _validar_fecha_iso(start_date, "start_date")
+    _validar_fecha_iso(end_date,   "end_date")
+    if start_date > end_date:
+        raise HTTPException(
+            status_code=400,
+            detail="start_date no puede ser posterior a end_date.",
+        )
+
+    try:
+        return get_precios_contratos(start_date, end_date)
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Error consultando precios de contratos en Olibia: {error}",
+        ) from error

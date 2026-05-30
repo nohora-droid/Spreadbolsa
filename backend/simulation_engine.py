@@ -177,6 +177,7 @@ def simular_contrato(
     bloques: list[dict] | None = None,
     perfil_pesos_24h: list[float] | None = None,
     perfil_excel_12x24: list[list[float]] | None = None,
+    ppp_resumen: dict | None = None,
 ) -> dict[str, Any]:
     """
     Simula el impacto de un nuevo contrato sobre el portafolio Olibia.
@@ -480,4 +481,6 @@ def simular_contrato(
             {"hora": h, "pb_promedio": round(perfil_pb[h], 2)}
             for h in range(1, 25)
         ],
+        # PPP real de contratos PC del período simulado (None si no disponible)
+        "ppp_contratos": ppp_resumen,
     }

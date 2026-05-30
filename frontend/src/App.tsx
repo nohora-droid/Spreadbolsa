@@ -13,10 +13,11 @@ import {
   YAxis,
 } from 'recharts'
 
-const API_BASE = 'http://127.0.0.1:8000/spread'
+const API_BASE     = 'http://127.0.0.1:8000/spread'
 const API_PORTFOLIO = 'http://127.0.0.1:8000/portfolio'
-const API_POSICION   = 'http://127.0.0.1:8000/portfolio/posicion'
-const API_SIMULATE = 'http://127.0.0.1:8000/simulate'
+const API_POSICION  = 'http://127.0.0.1:8000/portfolio/posicion'
+const API_SIMULATE  = 'http://127.0.0.1:8000/simulate'
+const API_PPP       = 'http://127.0.0.1:8000/contratos/ppp'
 
 const MESES_ES = [
   'Enero',
@@ -188,6 +189,22 @@ interface SimResultado {
   delta_costo_mcop: number
   perfil_horario: SimPerfilHora[]
   por_mes: SimMes[]
+  ppp_contratos?: PPPResumen | null
+}
+
+/** PPP de una categoría de operación (compra R, compra NR o venta). */
+interface PPPCategoria {
+  ppp: number | null
+  tipo: 'Indexado' | 'Proyectado' | 'Sin datos'
+}
+
+/** Resumen de PPP real por categoría devuelto por /contratos/ppp. */
+interface PPPResumen {
+  compra_r:      PPPCategoria
+  compra_nr:     PPPCategoria
+  venta:         PPPCategoria
+  pld_excluidos: number
+  contratos_pc:  number
 }
 
 function formatNumero(valor: number, decimales = 2): string {
@@ -529,6 +546,10 @@ function App() {
   const [wizSimCargando, setWizSimCargando] = useState(false)
   const [wizSimError,    setWizSimError]    = useState<string | null>(null)
 
+  // PPP real de contratos PC (cargado en paralelo con la posición)
+  const [wizPPPResumen,  setWizPPPResumen]  = useState<PPPResumen | null>(null)
+  const [portfolioPPP,   setPortfolioPPP]   = useState<PPPResumen | null>(null)
+
   const datosConSpread = useMemo(() => {
     return datos.map((d) => ({
       ...d,
@@ -646,33 +667,40 @@ function App() {
       setPortfolioCargando(true)
       setPortfolioError(null)
 
-      const respuesta = await fetch(
-        `${API_POSICION}?fecha_inicio=${inicio}&fecha_fin=${fin}`,
-        { signal },
-      )
+      // Carga paralela: posición horaria y PPP real de contratos
+      const [respPos, respPPP] = await Promise.allSettled([
+        fetch(`${API_POSICION}?fecha_inicio=${inicio}&fecha_fin=${fin}`, { signal }),
+        fetch(`${API_PPP}?start_date=${inicio}&end_date=${fin}`, { signal }),
+      ])
 
-      if (!respuesta.ok) {
-        const cuerpo = await respuesta.json().catch(() => null)
-        const detalle =
-          cuerpo && typeof cuerpo.detail === 'string'
-            ? cuerpo.detail
-            : `Error ${respuesta.status}`
-        throw new Error(detalle)
+      // Posición horaria (requerida)
+      if (respPos.status === 'fulfilled') {
+        const respuesta = respPos.value
+        if (!respuesta.ok) {
+          const cuerpo = await respuesta.json().catch(() => null)
+          const detalle = cuerpo && typeof cuerpo.detail === 'string' ? cuerpo.detail : `Error ${respuesta.status}`
+          throw new Error(detalle)
+        }
+        const json = await respuesta.json()
+        const candidatos = Array.isArray(json?.datos) ? json.datos : Array.isArray(json) ? json : []
+        setPortfolioDatos(candidatos.map(parseFilaPortfolio).filter(Boolean) as FilaPortfolio[])
+      } else {
+        if ((respPos.reason as Error)?.name === 'AbortError') return
+        throw new Error((respPos.reason as Error)?.message ?? 'Error cargando portafolio')
       }
 
-      const json = await respuesta.json()
-      const candidatos = Array.isArray(json?.datos)
-        ? json.datos
-        : Array.isArray(json)
-          ? json
-          : []
-      setPortfolioDatos(candidatos.map(parseFilaPortfolio).filter(Boolean) as FilaPortfolio[])
+      // PPP real (opcional — fallback a null si falla)
+      if (respPPP.status === 'fulfilled' && respPPP.value.ok) {
+        const json: PPPResumen = await respPPP.value.json().catch(() => null)
+        setPortfolioPPP(json ?? null)
+      } else {
+        setPortfolioPPP(null)
+      }
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return
-      setPortfolioError(
-        err instanceof Error ? err.message : 'No se pudieron cargar los datos',
-      )
+      setPortfolioError(err instanceof Error ? err.message : 'No se pudieron cargar los datos')
       setPortfolioDatos([])
+      setPortfolioPPP(null)
     } finally {
       setPortfolioCargando(false)
     }
@@ -715,18 +743,38 @@ function App() {
   async function wizCargarPosicion() {
     setWizPortfolioCargando(true); setWizPortfolioError(null)
     try {
-      const resp = await fetch(`${API_POSICION}?fecha_inicio=${wizPeriodoInicio}&fecha_fin=${wizPeriodoFin}`)
-      if (!resp.ok) { const c = await resp.json().catch(() => null); throw new Error(c?.detail ?? `Error ${resp.status}`) }
-      const json = await resp.json()
-      // resumen_mensual: [{mes, compra_r_mwh, compra_nr_mwh, venta_mwh, posicion_neta_mwh, dias}]
-      setWizPosicionMensual(Array.isArray(json?.resumen_mensual) ? json.resumen_mensual : [])
-      setWizTotalDias(typeof json?.total_dias === 'number' ? json.total_dias : 0)
-      setWizDistTipoDia(json?.distribucion_tipo_dia ?? null)
+      // Carga paralela: posición mensual de contratos y PPP real
+      const [respPos, respPPP] = await Promise.allSettled([
+        fetch(`${API_POSICION}?fecha_inicio=${wizPeriodoInicio}&fecha_fin=${wizPeriodoFin}`),
+        fetch(`${API_PPP}?start_date=${wizPeriodoInicio}&end_date=${wizPeriodoFin}`),
+      ])
+
+      // Posición (requerida — lanza si falla)
+      if (respPos.status === 'fulfilled') {
+        const resp = respPos.value
+        if (!resp.ok) { const c = await resp.json().catch(() => null); throw new Error(c?.detail ?? `Error ${resp.status}`) }
+        const json = await resp.json()
+        setWizPosicionMensual(Array.isArray(json?.resumen_mensual) ? json.resumen_mensual : [])
+        setWizTotalDias(typeof json?.total_dias === 'number' ? json.total_dias : 0)
+        setWizDistTipoDia(json?.distribucion_tipo_dia ?? null)
+      } else {
+        throw new Error((respPos.reason as Error)?.message ?? 'Error cargando posición')
+      }
+
+      // PPP real (opcional — si falla, el frontend usa precios mock como fallback)
+      if (respPPP.status === 'fulfilled' && respPPP.value.ok) {
+        const json: PPPResumen = await respPPP.value.json().catch(() => null)
+        setWizPPPResumen(json ?? null)
+      } else {
+        console.warn('[PPP] No se obtuvo PPP real de contratos. Se usarán precios mock como referencia.')
+        setWizPPPResumen(null)
+      }
     } catch (err) {
       setWizPortfolioError(err instanceof Error ? err.message : 'Error')
-      setWizPosicionMensual([]); setWizTotalDias(0); setWizDistTipoDia(null)
+      setWizPosicionMensual([]); setWizTotalDias(0); setWizDistTipoDia(null); setWizPPPResumen(null)
+    } finally {
+      setWizPortfolioCargando(false)
     }
-    finally { setWizPortfolioCargando(false) }
   }
 
   async function wizCargarPB() {
@@ -762,7 +810,7 @@ function App() {
     finally { setWizSimCargando(false) }
   }
 
-  function wizReset() { setWizPaso(1); setWizPosicionMensual([]); setWizTotalDias(0); setWizDistTipoDia(null); setWizPortfolioError(null); setWizPBDatos([]); setWizPBError(null); setWizResultado(null); setWizSimError(null); setWizSimExcel12x24(null); setWizSimExcelNombre('') }
+  function wizReset() { setWizPaso(1); setWizPosicionMensual([]); setWizTotalDias(0); setWizDistTipoDia(null); setWizPortfolioError(null); setWizPBDatos([]); setWizPBError(null); setWizResultado(null); setWizSimError(null); setWizSimExcel12x24(null); setWizSimExcelNombre(''); setWizPPPResumen(null) }
 
   function wizDescargarJSON() {
     if (!wizResultado) return
@@ -805,6 +853,10 @@ function App() {
   }
 
   const wizResumenMensual = useMemo(() => {
+    // Precios PPP reales con fallback a mock cuando no está disponible
+    const pppCompraR  = wizPPPResumen?.compra_r?.ppp  ?? PRECIO_MOCK_COMPRA_R
+    const pppCompraNr = wizPPPResumen?.compra_nr?.ppp ?? PRECIO_MOCK_COMPRA_NR
+    const pppVenta    = wizPPPResumen?.venta?.ppp     ?? PRECIO_MOCK_VENTA
     return wizPosicionMensual.map(m => ({
       mes:         m.mes,
       // Campos en kWh para la tabla del Paso 1
@@ -819,13 +871,13 @@ function App() {
       compraNrmwh: m.compra_nr_mwh,
       ventaMwh:    m.venta_mwh,
       posNetaMwh:  m.posicion_neta_mwh,
-      // COP mock para Paso 2
-      copCompraR:  m.compra_r_mwh  * 1_000 * PRECIO_MOCK_COMPRA_R  / 1_000_000,
-      copCompraNr: m.compra_nr_mwh * 1_000 * PRECIO_MOCK_COMPRA_NR / 1_000_000,
-      copVenta:    m.venta_mwh     * 1_000 * PRECIO_MOCK_VENTA     / 1_000_000,
+      // COP con PPP real (o mock como fallback)
+      copCompraR:  m.compra_r_mwh  * 1_000 * pppCompraR  / 1_000_000,
+      copCompraNr: m.compra_nr_mwh * 1_000 * pppCompraNr / 1_000_000,
+      copVenta:    m.venta_mwh     * 1_000 * pppVenta    / 1_000_000,
       tipoPos:     m.posicion_neta_mwh > 0 ? 'Comprando en bolsa' : 'Vendiendo en bolsa',
     }))
-  }, [wizPosicionMensual])
+  }, [wizPosicionMensual, wizPPPResumen])
 
   const wizPBPromedioGlobal = useMemo(() => {
     if (wizPBDatos.length === 0) return null
@@ -843,9 +895,11 @@ function App() {
       const pbProm = pbs.reduce((s, v) => s + v, 0) / pbs.length
       const portMes = `${invAnio}-${pbMes.slice(5)}`
       const posNetaMwh = mapaPort.get(portMes) ?? 0
-      return { mes: pbMes, pbProm, posNetaMwh, transaccionMcop: posNetaMwh * 1000 * pbProm / 1_000_000, spreadVsPB: PRECIO_MOCK_COMPRA_R - pbProm }
+      // Usar PPP real de compra R si disponible, mock como fallback
+      const pppRef = wizPPPResumen?.compra_r?.ppp ?? PRECIO_MOCK_COMPRA_R
+      return { mes: pbMes, pbProm, posNetaMwh, transaccionMcop: posNetaMwh * 1000 * pbProm / 1_000_000, spreadVsPB: pppRef - pbProm }
     })
-  }, [wizPBDatos, wizResumenMensual, wizPeriodoInicio])
+  }, [wizPBDatos, wizResumenMensual, wizPeriodoInicio, wizPPPResumen])
 
   const wizPBPerfilHorario = useMemo(() => {
     if (wizPBDatos.length === 0) return []
@@ -1806,12 +1860,39 @@ function App() {
                 value={portfolioResumen?.hora_pico_venta ? `H${portfolioResumen.hora_pico_venta}` : '—'}
                 accent="text-rose-400"
               />
-              <div className="rounded-xl border border-dashed border-amber-500/30 bg-amber-500/5 p-5">
-                <p className="text-xs font-medium uppercase tracking-wider text-amber-600">PPP Contratos</p>
-                <p className="mt-2 text-lg font-bold text-amber-500/60">Pendiente</p>
-                <p className="mt-1 text-xs text-gray-600 leading-relaxed">
-                  Requiere precios por contrato desde Olibia. Se calculará como Σ(energía × precio) / Σ(energía).
-                </p>
+              <div className="rounded-xl border border-gray-800 bg-gray-900 p-5">
+                <p className="text-xs font-medium uppercase tracking-wider text-gray-500">PPP Contratos PC</p>
+                {portfolioPPP ? (
+                  <div className="mt-2 space-y-2">
+                    {(
+                      [
+                        { label: 'Compra R',  cat: portfolioPPP.compra_r  },
+                        { label: 'Compra NR', cat: portfolioPPP.compra_nr },
+                        { label: 'Venta',     cat: portfolioPPP.venta     },
+                      ] as const
+                    ).map(({ label, cat }) => (
+                      <div key={label} className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-gray-500">{label}</span>
+                        <div className="flex items-center gap-1.5">
+                          {cat.ppp != null
+                            ? <span className="text-sm font-bold tabular-nums text-white">{formatNumero(cat.ppp)} COP/kWh</span>
+                            : <span className="text-sm text-gray-600">—</span>
+                          }
+                          <BadgeTipoPrecio tipo={cat.tipo} />
+                        </div>
+                      </div>
+                    ))}
+                    {portfolioPPP.pld_excluidos > 0 && (
+                      <p className="pt-1 text-xs text-amber-600">
+                        ⚠ {portfolioPPP.pld_excluidos} contrato(s) PLD excluidos (precio = bolsa)
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-sm text-amber-500/60">
+                    {portfolioCargando ? 'Calculando…' : 'Sin datos de precios'}
+                  </p>
+                )}
               </div>
             </section>
 
@@ -2145,7 +2226,16 @@ function App() {
                     <>
                       <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-5 py-3">
                         <p className="text-xs font-semibold uppercase tracking-widest text-gray-400">Capítulo 1 — Posición actual en el período</p>
-                        <p className="mt-0.5 text-xs text-gray-600">Precios mock: Compra R {PRECIO_MOCK_COMPRA_R} · Compra NR {PRECIO_MOCK_COMPRA_NR} · Venta {PRECIO_MOCK_VENTA} COP/kWh</p>
+                        {wizPPPResumen ? (
+                          <p className="mt-0.5 text-xs text-gray-500">
+                            PPP Olibia — Compra R: {wizPPPResumen.compra_r.ppp != null ? `${formatNumero(wizPPPResumen.compra_r.ppp)} COP/kWh` : '—'}
+                            {' · '}Compra NR: {wizPPPResumen.compra_nr.ppp != null ? `${formatNumero(wizPPPResumen.compra_nr.ppp)} COP/kWh` : '—'}
+                            {' · '}Venta: {wizPPPResumen.venta.ppp != null ? `${formatNumero(wizPPPResumen.venta.ppp)} COP/kWh` : '—'}
+                            {wizPPPResumen.pld_excluidos > 0 && ` · ${wizPPPResumen.pld_excluidos} PLD excluidos`}
+                          </p>
+                        ) : (
+                          <p className="mt-0.5 text-xs text-gray-600">Precios mock (fallback): Compra R {PRECIO_MOCK_COMPRA_R} · Compra NR {PRECIO_MOCK_COMPRA_NR} · Venta {PRECIO_MOCK_VENTA} COP/kWh</p>
+                        )}
                       </div>
                       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                         <MetricCard label="Compra total (kWh)" value={`${formatMiles(totR + totNr, 0)}`} subValue={`${formatMiles(totCR + totCNr, 1)} M COP`} accent="text-sky-400" />
@@ -2301,13 +2391,19 @@ function App() {
 
                 {wizPBResumenMensual.length > 0 && wizPBPromedioGlobal !== null && (() => {
                   const totalTransaccionMcop = wizPBResumenMensual.reduce((s, m) => s + m.transaccionMcop, 0)
-                  const spread = PRECIO_MOCK_COMPRA_R - wizPBPromedioGlobal
-                  const semColor = spread > 5 ? 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10' : spread > -5 ? 'text-amber-400 border-amber-500/40 bg-amber-500/10' : 'text-red-400 border-red-500/40 bg-red-500/10'
-                  const semIcon  = spread > 5 ? '✓' : spread > -5 ? '⚠' : '✗'
-                  const semTexto = spread > 5
-                    ? `Spread favorable: contratos mock ${PRECIO_MOCK_COMPRA_R} COP/kWh vs PB promedio ${formatNumero(wizPBPromedioGlobal)} COP/kWh (+${formatNumero(spread)} COP/kWh).`
-                    : spread > -5 ? `Spread marginal (${formatNumero(spread, 1)} COP/kWh). Evalúa con más detalle.`
-                    : `Spread negativo: PB promedio ${formatNumero(wizPBPromedioGlobal)} COP/kWh supera contratos actuales.`
+                  // Usar PPP real de Compra R si disponible; mock como fallback
+                  const pppRef      = wizPPPResumen?.compra_r?.ppp ?? PRECIO_MOCK_COMPRA_R
+                  const esPPPReal   = wizPPPResumen?.compra_r?.ppp != null
+                  const tipoPPP     = wizPPPResumen?.compra_r?.tipo ?? 'Sin datos'
+                  const spread      = pppRef - wizPBPromedioGlobal
+                  const semColor    = spread > 5 ? 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10' : spread > -5 ? 'text-amber-400 border-amber-500/40 bg-amber-500/10' : 'text-red-400 border-red-500/40 bg-red-500/10'
+                  const semIcon     = spread > 5 ? '✓' : spread > -5 ? '⚠' : '✗'
+                  const pppLabel    = esPPPReal ? `PPP Compra R ${formatNumero(pppRef)} COP/kWh` : `contratos mock ${pppRef} COP/kWh`
+                  const semTexto    = spread > 5
+                    ? `Spread favorable: ${pppLabel} vs PB promedio ${formatNumero(wizPBPromedioGlobal)} COP/kWh (+${formatNumero(spread)} COP/kWh).`
+                    : spread > -5
+                    ? `Spread marginal (${formatNumero(spread, 1)} COP/kWh). Evalúa con más detalle.`
+                    : `Spread negativo: PB promedio ${formatNumero(wizPBPromedioGlobal)} COP/kWh supera ${pppLabel}.`
                   return (
                     <>
                       <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-5 py-3">
@@ -2317,8 +2413,19 @@ function App() {
                         <div className="flex items-center gap-3"><span className="text-xl font-bold">{semIcon}</span><p className="text-sm">{semTexto}</p></div>
                       </div>
                       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        {/* PB promedio del escenario seleccionado */}
                         <MetricCard label="PB promedio escenario" value={`${formatNumero(wizPBPromedioGlobal)} COP/kWh`} accent="text-white" />
-                        <MetricCard label="PPP contratos (mock)" value={`${PRECIO_MOCK_COMPRA_R} COP/kWh`} accent="text-amber-400" />
+                        {/* PPP real de Compra R con badge de tipo; mock si no hay datos */}
+                        {esPPPReal ? (
+                          <div className="rounded-xl border border-gray-800 bg-gray-900 p-5">
+                            <p className="text-xs font-medium uppercase tracking-wider text-gray-500">PPP Compra R</p>
+                            <p className="mt-2 text-2xl font-bold tabular-nums text-white">{formatNumero(pppRef)}</p>
+                            <p className="text-xs text-gray-500">COP/kWh</p>
+                            <div className="mt-1"><BadgeTipoPrecio tipo={tipoPPP as 'Indexado' | 'Proyectado' | 'Sin datos'} /></div>
+                          </div>
+                        ) : (
+                          <MetricCard label="PPP contratos (mock)" value={`${PRECIO_MOCK_COMPRA_R} COP/kWh`} accent="text-amber-400" />
+                        )}
                         <MetricCard label="Spread promedio" value={`${spread >= 0 ? '+' : ''}${formatNumero(spread)} COP/kWh`} accent={spread >= 0 ? 'text-emerald-400' : 'text-red-400'} />
                         <MetricCard
                           label={totalTransaccionMcop > 0 ? 'Costo en bolsa (M COP)' : 'Ingreso en bolsa (M COP)'}
@@ -2326,6 +2433,37 @@ function App() {
                           accent={totalTransaccionMcop <= 0 ? 'text-emerald-400' : 'text-red-400'}
                         />
                       </div>
+                      {/* Detalle de PPP por categoría y aviso PLD si hay contratos excluidos */}
+                      {wizPPPResumen && (
+                        <div className="rounded-xl border border-gray-800 bg-gray-900/40 px-5 py-4">
+                          <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-gray-500">PPP por categoría de contrato PC</p>
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                            {(
+                              [
+                                { label: 'Compra Regulada',    cat: wizPPPResumen.compra_r  },
+                                { label: 'Compra No Regulada', cat: wizPPPResumen.compra_nr },
+                                { label: 'Venta',              cat: wizPPPResumen.venta     },
+                              ] as const
+                            ).map(({ label, cat }) => (
+                              <div key={label} className="flex items-center justify-between rounded-lg border border-gray-700/50 bg-gray-800/40 px-3 py-2">
+                                <span className="text-xs text-gray-400">{label}</span>
+                                <div className="flex items-center gap-1.5">
+                                  {cat.ppp != null
+                                    ? <span className="text-sm font-bold tabular-nums text-white">{formatNumero(cat.ppp)} COP/kWh</span>
+                                    : <span className="text-sm text-gray-600">—</span>
+                                  }
+                                  <BadgeTipoPrecio tipo={cat.tipo} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          {wizPPPResumen.pld_excluidos > 0 && (
+                            <p className="mt-3 text-xs text-amber-500">
+                              ⚠ {wizPPPResumen.pld_excluidos} contrato(s) PLD excluidos del PPP — su precio es el precio de bolsa en cada hora.
+                            </p>
+                          )}
+                        </div>
+                      )}
                       <TablaAnalisis
                         encabezados={['Mes','PB Promedio (COP/kWh)','Posición Neta (MWh)','Trans. Bolsa (M COP)','Spread Contratos vs PB']}
                         filas={wizPBResumenMensual.map(m => (
@@ -2490,7 +2628,21 @@ function App() {
                       <div className="space-y-1.5 text-sm text-gray-300">
                         <p>📅 <span className="font-semibold text-white">{wizPBDesde}</span> → <span className="font-semibold text-white">{wizPBHasta}</span></p>
                         <p>📊 PB promedio: <span className="font-semibold text-white">{formatNumero(wizPBPromedioGlobal)} COP/kWh</span></p>
-                        <p>Spread mock: <span className={`font-semibold ${PRECIO_MOCK_COMPRA_R - wizPBPromedioGlobal >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{PRECIO_MOCK_COMPRA_R - wizPBPromedioGlobal >= 0 ? '+' : ''}{formatNumero(PRECIO_MOCK_COMPRA_R - wizPBPromedioGlobal)} COP/kWh</span></p>
+                        {/* Spread: usa PPP real de Compra R si disponible, mock como fallback */}
+                        {(() => {
+                          const pppRef   = wizPPPResumen?.compra_r?.ppp ?? PRECIO_MOCK_COMPRA_R
+                          const spreadPP = pppRef - wizPBPromedioGlobal
+                          const esPPP    = wizPPPResumen?.compra_r?.ppp != null
+                          return (
+                            <div className="flex items-center gap-2">
+                              <span className="text-gray-400">{esPPP ? 'Spread PPP vs PB:' : 'Spread mock vs PB:'}</span>
+                              <span className={`font-semibold ${spreadPP >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                {spreadPP >= 0 ? '+' : ''}{formatNumero(spreadPP)} COP/kWh
+                              </span>
+                              {esPPP && <BadgeTipoPrecio tipo={wizPPPResumen!.compra_r.tipo} />}
+                            </div>
+                          )
+                        })()}
                       </div>
                     </div>
                   )}
@@ -2656,6 +2808,20 @@ function MensajeSinDatos({ children }: { children: ReactNode }) {
     <div className="rounded-lg border border-gray-800 bg-gray-950/60 px-4 py-8 text-center text-sm text-gray-500">
       {children}
     </div>
+  )
+}
+
+/** Badge de color para indicar si el PPP es Indexado (verde), Proyectado (ámbar) o Sin datos (gris). */
+function BadgeTipoPrecio({ tipo }: { tipo: 'Indexado' | 'Proyectado' | 'Sin datos' }) {
+  const cfg: Record<string, string> = {
+    'Indexado':   'bg-emerald-500/15 text-emerald-400 ring-emerald-500/40',
+    'Proyectado': 'bg-amber-500/15   text-amber-400   ring-amber-500/40',
+    'Sin datos':  'bg-gray-500/15    text-gray-400    ring-gray-500/40',
+  }
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ring-1 ${cfg[tipo] ?? cfg['Sin datos']}`}>
+      {tipo}
+    </span>
   )
 }
 
