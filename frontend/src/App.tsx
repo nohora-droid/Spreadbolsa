@@ -123,6 +123,8 @@ interface FilaPortfolio {
   compra_r: number
   compra_nr: number
   venta: number
+  demanda_r: number    // NUEVO
+  demanda_nr: number   // NUEVO
   posicion_neta: number
   costo_bolsa: number
 }
@@ -133,6 +135,8 @@ interface FilaPosicionMensual {
   compra_r_mwh: number
   compra_nr_mwh: number
   venta_mwh: number
+  demanda_r_mwh?: number   // NUEVO
+  demanda_nr_mwh?: number  // NUEVO
   posicion_neta_mwh: number
   dias: number         // días reales del mes procesados
 }
@@ -147,6 +151,8 @@ interface DistribucionTipoDia {
 
 interface PortfolioResumen {
   posicion_neta_total_kwh: number
+  demanda_r_total_kwh: number     // NUEVO
+  demanda_nr_total_kwh: number    // NUEVO
   costo_bolsa_total_cop: number
   hora_pico_compra: number | null
   hora_pico_venta: number | null
@@ -416,13 +422,15 @@ function parseFilaPortfolio(valor: unknown): FilaPortfolio | null {
   const fila = valor as Record<string, unknown>
   const hora = parseNumero(fila.hora)
   if (hora < 1 || hora > 24) return null
-  const compraR = parseNumero(fila.compra_r_kwh)
+  const compraR  = parseNumero(fila.compra_r_kwh)
   const compraNr = parseNumero(fila.compra_nr_kwh)
-  const venta = parseNumero(fila.venta_kwh)
+  const venta    = parseNumero(fila.venta_kwh)
+  const demandaR  = parseNumero(fila.demanda_r_kwh)
+  const demandaNr = parseNumero(fila.demanda_nr_kwh)
   const posicionNeta =
     fila.posicion_neta_kwh != null
       ? parseNumero(fila.posicion_neta_kwh)
-      : compraR + compraNr - venta
+      : compraR + compraNr - venta - demandaR - demandaNr
   return {
     fecha: String(fila.fecha ?? ''),
     hora,
@@ -430,11 +438,13 @@ function parseFilaPortfolio(valor: unknown): FilaPortfolio | null {
       typeof fila.tipo_dia === 'string' && fila.tipo_dia.trim() !== ''
         ? fila.tipo_dia
         : undefined,
-    compra_r: compraR,
-    compra_nr: compraNr,
+    compra_r:     compraR,
+    compra_nr:    compraNr,
     venta,
+    demanda_r:    demandaR,
+    demanda_nr:   demandaNr,
     posicion_neta: posicionNeta,
-    costo_bolsa: parseNumero(fila.costo_bolsa_cop),
+    costo_bolsa:  parseNumero(fila.costo_bolsa_cop),
   }
 }
 
@@ -637,7 +647,7 @@ function App() {
       setPortfolioError(null)
 
       const respuesta = await fetch(
-        `${API_PORTFOLIO}?fecha_inicio=${inicio}&fecha_fin=${fin}`,
+        `${API_POSICION}?fecha_inicio=${inicio}&fecha_fin=${fin}`,
         { signal },
       )
 
@@ -795,15 +805,21 @@ function App() {
   }
 
   const wizResumenMensual = useMemo(() => {
-    // El backend devuelve energía pura (kWh→MWh).
-    // Los precios COP son mock y se aplican aquí en el frontend.
     return wizPosicionMensual.map(m => ({
       mes:         m.mes,
+      // Campos en kWh para la tabla del Paso 1
+      compraRkwh:  m.compra_r_mwh  * 1_000,
+      compraNrkwh: m.compra_nr_mwh * 1_000,
+      ventaKwh:    m.venta_mwh     * 1_000,
+      demandaRkwh: (m.demanda_r_mwh  ?? 0) * 1_000,
+      demandaNrkwh:(m.demanda_nr_mwh ?? 0) * 1_000,
+      posNetaKwh:  m.posicion_neta_mwh * 1_000,
+      // Campos en MWh para cálculos del Paso 2 (NO cambiar estos)
       compraRmwh:  m.compra_r_mwh,
       compraNrmwh: m.compra_nr_mwh,
       ventaMwh:    m.venta_mwh,
       posNetaMwh:  m.posicion_neta_mwh,
-      // Mock COP: compra_r=320, compra_nr=290, venta=380 COP/kWh
+      // COP mock para Paso 2
       copCompraR:  m.compra_r_mwh  * 1_000 * PRECIO_MOCK_COMPRA_R  / 1_000_000,
       copCompraNr: m.compra_nr_mwh * 1_000 * PRECIO_MOCK_COMPRA_NR / 1_000_000,
       copVenta:    m.venta_mwh     * 1_000 * PRECIO_MOCK_VENTA     / 1_000_000,
@@ -946,30 +962,28 @@ function App() {
 
   const portfolioResumen = useMemo<PortfolioResumen | null>(() => {
     if (portfolioDatos.length === 0) return null
-    const posicion_neta_total_kwh = portfolioDatos.reduce(
-      (sum, f) => sum + f.posicion_neta,
-      0,
-    )
-    const costo_bolsa_total_cop = portfolioDatos.reduce(
-      (sum, f) => sum + f.costo_bolsa,
-      0,
-    )
+    const posicion_neta_total_kwh = portfolioDatos.reduce((sum, f) => sum + f.posicion_neta, 0)
+    const demanda_r_total_kwh    = portfolioDatos.reduce((sum, f) => sum + f.demanda_r,    0)
+    const demanda_nr_total_kwh   = portfolioDatos.reduce((sum, f) => sum + f.demanda_nr,   0)
+    const costo_bolsa_total_cop  = portfolioDatos.reduce((sum, f) => sum + f.costo_bolsa,  0)
     const porHora = Array.from({ length: 24 }, (_, i) => i + 1).map((hora) => {
       const filas = portfolioDatos.filter((f) => f.hora === hora)
       if (filas.length === 0) return { hora, compra: 0, venta: 0 }
       return {
         hora,
         compra: filas.reduce((s, f) => s + f.compra_r + f.compra_nr, 0) / filas.length,
-        venta: filas.reduce((s, f) => s + f.venta, 0) / filas.length,
+        venta:  filas.reduce((s, f) => s + f.venta, 0) / filas.length,
       }
     })
     const horaPicoCompra = porHora.reduce((a, b) => (a.compra >= b.compra ? a : b))
-    const horaPicoVenta = porHora.reduce((a, b) => (a.venta >= b.venta ? a : b))
+    const horaPicoVenta  = porHora.reduce((a, b) => (a.venta  >= b.venta  ? a : b))
     return {
       posicion_neta_total_kwh,
+      demanda_r_total_kwh,
+      demanda_nr_total_kwh,
       costo_bolsa_total_cop,
       hora_pico_compra: horaPicoCompra.compra > 0 ? horaPicoCompra.hora : null,
-      hora_pico_venta: horaPicoVenta.venta > 0 ? horaPicoVenta.hora : null,
+      hora_pico_venta:  horaPicoVenta.venta   > 0 ? horaPicoVenta.hora  : null,
     }
   }, [portfolioDatos])
 
@@ -978,14 +992,18 @@ function App() {
       const hora = i + 1
       const filas = portfolioDatos.filter((f) => f.hora === hora)
       if (filas.length === 0) {
-        return { hora, compra_r: 0, compra_nr: 0, venta: 0, posicion_neta: 0 }
+        return { hora, compra_r: 0, compra_nr: 0, venta: 0, demanda_r: 0, demanda_nr: 0, posicion_neta: 0 }
       }
+      // Promedio por hora en kWh (sin dividir por 1000)
+      const n = filas.length
       return {
         hora,
-        compra_r: filas.reduce((s, f) => s + f.compra_r, 0) / filas.length / 1000,
-        compra_nr: filas.reduce((s, f) => s + f.compra_nr, 0) / filas.length / 1000,
-        venta: filas.reduce((s, f) => s + f.venta, 0) / filas.length / 1000,
-        posicion_neta: filas.reduce((s, f) => s + f.posicion_neta, 0) / filas.length / 1000,
+        compra_r:     filas.reduce((s, f) => s + f.compra_r,    0) / n,
+        compra_nr:    filas.reduce((s, f) => s + f.compra_nr,   0) / n,
+        venta:        filas.reduce((s, f) => s + f.venta,       0) / n,
+        demanda_r:    filas.reduce((s, f) => s + f.demanda_r,   0) / n,
+        demanda_nr:   filas.reduce((s, f) => s + f.demanda_nr,  0) / n,
+        posicion_neta:filas.reduce((s, f) => s + f.posicion_neta, 0) / n,
       }
     })
   }, [portfolioDatos])
@@ -1000,13 +1018,21 @@ function App() {
     }
     return [...mapa.entries()]
       .map(([fecha, filas]) => {
-        const compraR = filas.reduce((s, f) => s + f.compra_r, 0) / 1000
-        const compraNr = filas.reduce((s, f) => s + f.compra_nr, 0) / 1000
-        const venta = filas.reduce((s, f) => s + f.venta, 0) / 1000
-        const posicionNeta = filas.reduce((s, f) => s + f.posicion_neta, 0) / 1000
-        const costoBolsa = filas.reduce((s, f) => s + f.costo_bolsa, 0) / 1_000_000
-        const tipoDia = tipoDiaDesdefecha(fecha)
-        return { fecha, tipoDia, compraR, compraNr, venta, posicionNeta, costoBolsa }
+        // Acumular en kWh (sin dividir por 1000)
+        const compraR     = filas.reduce((s, f) => s + f.compra_r,     0)
+        const compraNr    = filas.reduce((s, f) => s + f.compra_nr,    0)
+        const venta       = filas.reduce((s, f) => s + f.venta,        0)
+        const demandaR    = filas.reduce((s, f) => s + f.demanda_r,    0)
+        const demandaNr   = filas.reduce((s, f) => s + f.demanda_nr,   0)
+        const posicionNeta= filas.reduce((s, f) => s + f.posicion_neta, 0)
+        // Usar tipo_dia del dato (ya clasificado por el backend); fallback local
+        const tipoDiaRaw  = filas[0]?.tipo_dia ?? ''
+        const tipoDia = tipoDiaRaw === 'ordinario' ? 'Ordinario'
+                      : tipoDiaRaw === 'sabado'    ? 'Sábado'
+                      : tipoDiaRaw === 'domingo'   ? 'Domingo'
+                      : tipoDiaRaw === 'festivo'   ? 'Festivo'
+                      : tipoDiaDesdefecha(fecha)
+        return { fecha, tipoDia, compraR, compraNr, venta, demandaR, demandaNr, posicionNeta }
       })
       .sort((a, b) => a.fecha.localeCompare(b.fecha))
   }, [portfolioDatos])
@@ -1030,13 +1056,14 @@ function App() {
     if (portfolioResumenDiarioFiltrado.length === 0) return null
     return portfolioResumenDiarioFiltrado.reduce(
       (acc, f) => ({
-        compraR: acc.compraR + f.compraR,
-        compraNr: acc.compraNr + f.compraNr,
-        venta: acc.venta + f.venta,
+        compraR:      acc.compraR      + f.compraR,
+        compraNr:     acc.compraNr     + f.compraNr,
+        venta:        acc.venta        + f.venta,
+        demandaR:     acc.demandaR     + f.demandaR,
+        demandaNr:    acc.demandaNr    + f.demandaNr,
         posicionNeta: acc.posicionNeta + f.posicionNeta,
-        costoBolsa: acc.costoBolsa + f.costoBolsa,
       }),
-      { compraR: 0, compraNr: 0, venta: 0, posicionNeta: 0, costoBolsa: 0 },
+      { compraR: 0, compraNr: 0, venta: 0, demandaR: 0, demandaNr: 0, posicionNeta: 0 },
     )
   }, [portfolioResumenDiarioFiltrado])
 
@@ -1051,7 +1078,13 @@ function App() {
     const acum = { ordinario: init24(), sabado: init24(), domfest: init24() }
 
     for (const fila of filtradas) {
-      const tipo = tipoDiaDesdefecha(fila.fecha)
+      const tipoRaw = fila.tipo_dia ?? ''
+      const tipo =
+        tipoRaw === 'ordinario' ? 'Ordinario'
+        : tipoRaw === 'sabado'  ? 'Sábado'
+        : tipoRaw === 'domingo' ? 'Domingo'
+        : tipoRaw === 'festivo' ? 'Festivo'
+        : tipoDiaDesdefecha(fila.fecha)
       const balde =
         tipo === 'Sábado'
           ? acum.sabado
@@ -1739,14 +1772,10 @@ function App() {
               )}
             </section>
 
-            <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
+            <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
               <MetricCard
-                label="Posición Neta (MWh)"
-                value={
-                  portfolioResumen
-                    ? `${formatMiles(portfolioResumen.posicion_neta_total_kwh / 1000)}`
-                    : '—'
-                }
+                label="Posición Neta (kWh)"
+                value={portfolioResumen ? formatMiles(portfolioResumen.posicion_neta_total_kwh) : '—'}
                 accent={
                   portfolioResumen && portfolioResumen.posicion_neta_total_kwh <= 0
                     ? 'text-emerald-400'
@@ -1754,44 +1783,30 @@ function App() {
                 }
               />
               <MetricCard
-                label="Costo/Ingreso Bolsa (M COP)"
-                value={
-                  portfolioResumen
-                    ? `${formatMiles(portfolioResumen.costo_bolsa_total_cop / 1_000_000)}`
-                    : '—'
-                }
-                accent={
-                  portfolioResumen && portfolioResumen.costo_bolsa_total_cop <= 0
-                    ? 'text-emerald-400'
-                    : 'text-red-400'
-                }
+                label="Total Demanda R (kWh)"
+                value={portfolioResumen ? formatMiles(portfolioResumen.demanda_r_total_kwh) : '—'}
+                accent="text-orange-400"
+              />
+              <MetricCard
+                label="Total Demanda NR (kWh)"
+                value={portfolioResumen ? formatMiles(portfolioResumen.demanda_nr_total_kwh) : '—'}
+                accent="text-purple-400"
               />
               <MetricCard
                 label="Hora Pico Compra"
-                value={
-                  portfolioResumen?.hora_pico_compra
-                    ? `H${portfolioResumen.hora_pico_compra}`
-                    : '—'
-                }
+                value={portfolioResumen?.hora_pico_compra ? `H${portfolioResumen.hora_pico_compra}` : '—'}
                 accent="text-sky-400"
               />
               <MetricCard
                 label="Hora Pico Venta"
-                value={
-                  portfolioResumen?.hora_pico_venta
-                    ? `H${portfolioResumen.hora_pico_venta}`
-                    : '—'
-                }
+                value={portfolioResumen?.hora_pico_venta ? `H${portfolioResumen.hora_pico_venta}` : '—'}
                 accent="text-rose-400"
               />
               <div className="rounded-xl border border-dashed border-amber-500/30 bg-amber-500/5 p-5">
-                <p className="text-xs font-medium uppercase tracking-wider text-amber-600">
-                  PPP Contratos
-                </p>
+                <p className="text-xs font-medium uppercase tracking-wider text-amber-600">PPP Contratos</p>
                 <p className="mt-2 text-lg font-bold text-amber-500/60">Pendiente</p>
                 <p className="mt-1 text-xs text-gray-600 leading-relaxed">
-                  Requiere precios por contrato desde Olibia. Se calculará como
-                  Σ(energía × precio) / Σ(energía).
+                  Requiere precios por contrato desde Olibia. Se calculará como Σ(energía × precio) / Σ(energía).
                 </p>
               </div>
             </section>
@@ -1802,56 +1817,22 @@ function App() {
               </h2>
               <div className="h-80 w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart
-                    data={portfolioPorHora}
-                    margin={{ top: 8, right: 48, left: 0, bottom: 8 }}
-                  >
+                  <BarChart data={portfolioPorHora} margin={{ top: 8, right: 48, left: 0, bottom: 8 }}>
                     <CartesianGrid stroke="#374151" strokeDasharray="3 3" />
-                    <XAxis
-                      dataKey="hora"
-                      stroke="#9ca3af"
-                      tick={{ fill: '#9ca3af', fontSize: 12 }}
-                    />
-                    <YAxis
-                      yAxisId="left"
-                      stroke="#9ca3af"
-                      tick={{ fill: '#9ca3af', fontSize: 12 }}
-                    />
-                    <YAxis
-                      yAxisId="right"
-                      orientation="right"
-                      stroke="#eab308"
-                      tick={{ fill: '#eab308', fontSize: 12 }}
-                    />
+                    <XAxis dataKey="hora" stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 12 }} />
+                    <YAxis yAxisId="left"  stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 12 }} />
+                    <YAxis yAxisId="right" orientation="right" stroke="#eab308" tick={{ fill: '#eab308', fontSize: 12 }} />
                     <Tooltip
-                      contentStyle={{
-                        backgroundColor: '#111827',
-                        border: '1px solid #374151',
-                        borderRadius: '8px',
-                        color: '#f3f4f6',
-                      }}
+                      contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '8px', color: '#f3f4f6' }}
                       labelFormatter={(hora) => `Hora: ${hora}`}
-                      formatter={(value, name) => [
-                        `${formatMiles(Number(value))} MWh`,
-                        name,
-                      ]}
+                      formatter={(value, name) => [`${formatMiles(Number(value))} kWh`, name]}
                     />
                     <Legend wrapperStyle={{ color: '#9ca3af', paddingTop: 12 }} />
-                    <Bar
-                      yAxisId="left"
-                      dataKey="compra_r"
-                      stackId="compras"
-                      name="Compra R"
-                      fill="#3b82f6"
-                    />
-                    <Bar
-                      yAxisId="left"
-                      dataKey="compra_nr"
-                      stackId="compras"
-                      name="Compra NR"
-                      fill="#22c55e"
-                    />
-                    <Bar yAxisId="left" dataKey="venta" name="Venta" fill="#ef4444" />
+                    <Bar yAxisId="left" dataKey="compra_r"  stackId="pos" name="Compra R"    fill="#3b82f6" />
+                    <Bar yAxisId="left" dataKey="compra_nr" stackId="pos" name="Compra NR"   fill="#22c55e" />
+                    <Bar yAxisId="left" dataKey="demanda_r"  name="Demanda R"  fill="#f97316" />
+                    <Bar yAxisId="left" dataKey="demanda_nr" name="Demanda NR" fill="#a855f7" />
+                    <Bar yAxisId="left" dataKey="venta"     name="Venta"       fill="#ef4444" />
                     <Line
                       yAxisId="right"
                       type="monotone"
@@ -2057,72 +2038,40 @@ function App() {
                     encabezados={[
                       'Fecha',
                       'Tipo Día',
-                      'Compra R (MWh)',
-                      'Compra NR (MWh)',
-                      'Venta (MWh)',
-                      'Posición Neta (MWh)',
-                      'Costo Bolsa (M COP)',
+                      'Compra R (kWh)',
+                      'Compra NR (kWh)',
+                      'Venta (kWh)',
+                      'Demanda R (kWh)',
+                      'Demanda NR (kWh)',
+                      'Posición Neta (kWh)',
                     ]}
                     filas={
                       <>
                         {portfolioResumenDiarioFiltrado.map((fila) => (
-                          <tr
-                            key={fila.fecha}
-                            className="transition-colors hover:bg-gray-800/40"
-                          >
-                            <td className="px-4 py-2.5 text-gray-300">
-                              {formatFechaLegible(fila.fecha)}
-                            </td>
-                            <td className="px-4 py-2.5 text-right text-gray-300">
-                              {fila.tipoDia}
-                            </td>
-                            <td className="px-4 py-2.5 text-right tabular-nums text-sky-300">
-                              {formatMiles(fila.compraR)}
-                            </td>
-                            <td className="px-4 py-2.5 text-right tabular-nums text-emerald-300">
-                              {formatMiles(fila.compraNr)}
-                            </td>
-                            <td className="px-4 py-2.5 text-right tabular-nums text-rose-300">
-                              {formatMiles(fila.venta)}
-                            </td>
-                            <td
-                              className={`px-4 py-2.5 text-right font-medium tabular-nums ${
-                                fila.posicionNeta <= 0 ? 'text-emerald-400' : 'text-red-400'
-                              }`}
-                            >
+                          <tr key={fila.fecha} className="transition-colors hover:bg-gray-800/40">
+                            <td className="px-4 py-2.5 text-gray-300">{formatFechaLegible(fila.fecha)}</td>
+                            <td className="px-4 py-2.5 text-right text-gray-300">{fila.tipoDia}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums text-sky-300">{formatMiles(fila.compraR)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums text-emerald-300">{formatMiles(fila.compraNr)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums text-rose-300">{formatMiles(fila.venta)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums text-orange-400">{formatMiles(fila.demandaR)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums text-purple-400">{formatMiles(fila.demandaNr)}</td>
+                            <td className={`px-4 py-2.5 text-right font-medium tabular-nums ${fila.posicionNeta <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                               {formatMiles(fila.posicionNeta)}
-                            </td>
-                            <td className="px-4 py-2.5 text-right tabular-nums text-gray-200">
-                              {formatMiles(fila.costoBolsa)}
                             </td>
                           </tr>
                         ))}
                         {portfolioTotalesFiltrados && (
                           <tr className="border-t-2 border-gray-700 bg-gray-800/60">
-                            <td className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-gray-400">
-                              TOTAL MES
-                            </td>
+                            <td className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-gray-400">TOTAL</td>
                             <td className="px-4 py-2.5" />
-                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-sky-300">
-                              {formatMiles(portfolioTotalesFiltrados.compraR)}
-                            </td>
-                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-emerald-300">
-                              {formatMiles(portfolioTotalesFiltrados.compraNr)}
-                            </td>
-                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-rose-300">
-                              {formatMiles(portfolioTotalesFiltrados.venta)}
-                            </td>
-                            <td
-                              className={`px-4 py-2.5 text-right font-semibold tabular-nums ${
-                                portfolioTotalesFiltrados.posicionNeta <= 0
-                                  ? 'text-emerald-400'
-                                  : 'text-red-400'
-                              }`}
-                            >
+                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-sky-300">{formatMiles(portfolioTotalesFiltrados.compraR)}</td>
+                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-emerald-300">{formatMiles(portfolioTotalesFiltrados.compraNr)}</td>
+                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-rose-300">{formatMiles(portfolioTotalesFiltrados.venta)}</td>
+                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-orange-400">{formatMiles(portfolioTotalesFiltrados.demandaR)}</td>
+                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-purple-400">{formatMiles(portfolioTotalesFiltrados.demandaNr)}</td>
+                            <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${portfolioTotalesFiltrados.posicionNeta <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                               {formatMiles(portfolioTotalesFiltrados.posicionNeta)}
-                            </td>
-                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-gray-200">
-                              {formatMiles(portfolioTotalesFiltrados.costoBolsa)}
                             </td>
                           </tr>
                         )}
@@ -2169,14 +2118,18 @@ function App() {
                 </section>
 
                 {wizResumenMensual.length > 0 && (() => {
-                  const totR   = wizResumenMensual.reduce((s, m) => s + m.compraRmwh, 0)
-                  const totNr  = wizResumenMensual.reduce((s, m) => s + m.compraNrmwh, 0)
-                  const totV   = wizResumenMensual.reduce((s, m) => s + m.ventaMwh, 0)
-                  const totP   = wizResumenMensual.reduce((s, m) => s + m.posNetaMwh, 0)
-                  const totCR  = wizResumenMensual.reduce((s, m) => s + m.copCompraR, 0)
-                  const totCNr = wizResumenMensual.reduce((s, m) => s + m.copCompraNr, 0)
-                  const totCV  = wizResumenMensual.reduce((s, m) => s + m.copVenta, 0)
-                  const nVend  = wizResumenMensual.filter(m => m.posNetaMwh < 0).length
+                  // Totales en kWh
+                  const totR    = wizResumenMensual.reduce((s, m) => s + m.compraRkwh,   0)
+                  const totNr   = wizResumenMensual.reduce((s, m) => s + m.compraNrkwh,  0)
+                  const totV    = wizResumenMensual.reduce((s, m) => s + m.ventaKwh,     0)
+                  const totDR   = wizResumenMensual.reduce((s, m) => s + m.demandaRkwh,  0)
+                  const totDNr  = wizResumenMensual.reduce((s, m) => s + m.demandaNrkwh, 0)
+                  const totP    = wizResumenMensual.reduce((s, m) => s + m.posNetaKwh,   0)
+                  // COP mock en MWh para compatibilidad paso 2
+                  const totCR   = wizResumenMensual.reduce((s, m) => s + m.copCompraR,   0)
+                  const totCNr  = wizResumenMensual.reduce((s, m) => s + m.copCompraNr,  0)
+                  const totCV   = wizResumenMensual.reduce((s, m) => s + m.copVenta,     0)
+                  const nVend   = wizResumenMensual.filter(m => m.posNetaKwh <= 0).length
                   return (
                     <>
                       <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-5 py-3">
@@ -2184,21 +2137,23 @@ function App() {
                         <p className="mt-0.5 text-xs text-gray-600">Precios mock: Compra R {PRECIO_MOCK_COMPRA_R} · Compra NR {PRECIO_MOCK_COMPRA_NR} · Venta {PRECIO_MOCK_VENTA} COP/kWh</p>
                       </div>
                       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                        <MetricCard label="Compra total" value={`${formatMiles(totR + totNr, 0)} MWh`} subValue={`${formatMiles(totCR + totCNr, 1)} M COP`} accent="text-sky-400" />
-                        <MetricCard label="Venta total"  value={`${formatMiles(totV, 0)} MWh`} subValue={`${formatMiles(totCV, 1)} M COP`} accent="text-rose-400" />
-                        <MetricCard label="Posición neta total" value={`${formatMiles(totP, 0)} MWh`} accent={totP <= 0 ? 'text-emerald-400' : 'text-red-400'} />
+                        <MetricCard label="Compra total (kWh)" value={`${formatMiles(totR + totNr, 0)}`} subValue={`${formatMiles(totCR + totCNr, 1)} M COP`} accent="text-sky-400" />
+                        <MetricCard label="Venta total (kWh)"  value={`${formatMiles(totV, 0)}`} subValue={`${formatMiles(totCV, 1)} M COP`} accent="text-rose-400" />
+                        <MetricCard label="Posición neta (kWh)" value={`${formatMiles(totP, 0)}`} accent={totP <= 0 ? 'text-emerald-400' : 'text-red-400'} />
                         <MetricCard label="Tipo dominante" value={`${nVend} de ${wizResumenMensual.length} meses vendedor`} accent="text-amber-400" />
                       </div>
                       <TablaAnalisis
-                        encabezados={['Mes','Compra R (MWh)','Compra NR (MWh)','Venta (MWh)','Pos. Neta (MWh)','Tipo']}
+                        encabezados={['Mes','Compra R (kWh)','Compra NR (kWh)','Venta (kWh)','Demanda R (kWh)','Demanda NR (kWh)','Pos. Neta (kWh)','Tipo Posición']}
                         filas={<>
                           {wizResumenMensual.map(m => (
                             <tr key={m.mes} className="transition-colors hover:bg-gray-800/40">
                               <td className="px-4 py-2.5 font-medium text-gray-200">{formatMes(m.mes)}</td>
-                              <td className="px-4 py-2.5 text-right tabular-nums text-sky-300">{formatMiles(m.compraRmwh, 0)}</td>
-                              <td className="px-4 py-2.5 text-right tabular-nums text-sky-300">{formatMiles(m.compraNrmwh, 0)}</td>
-                              <td className="px-4 py-2.5 text-right tabular-nums text-rose-300">{formatMiles(m.ventaMwh, 0)}</td>
-                              <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${m.posNetaMwh <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{formatMiles(m.posNetaMwh, 0)}</td>
+                              <td className="px-4 py-2.5 text-right tabular-nums text-sky-300">{formatMiles(m.compraRkwh, 0)}</td>
+                              <td className="px-4 py-2.5 text-right tabular-nums text-sky-300">{formatMiles(m.compraNrkwh, 0)}</td>
+                              <td className="px-4 py-2.5 text-right tabular-nums text-rose-300">{formatMiles(m.ventaKwh, 0)}</td>
+                              <td className="px-4 py-2.5 text-right tabular-nums text-orange-400">{formatMiles(m.demandaRkwh, 0)}</td>
+                              <td className="px-4 py-2.5 text-right tabular-nums text-purple-400">{formatMiles(m.demandaNrkwh, 0)}</td>
+                              <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${m.posNetaKwh <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{formatMiles(m.posNetaKwh, 0)}</td>
                               <td className={`px-4 py-2.5 text-right text-xs font-semibold ${m.tipoPos === 'Vendedor' ? 'text-emerald-400' : 'text-red-400'}`}>{m.tipoPos}</td>
                             </tr>
                           ))}
@@ -2207,23 +2162,26 @@ function App() {
                             <td className="px-4 py-2.5 text-right font-bold tabular-nums text-sky-300">{formatMiles(totR, 0)}</td>
                             <td className="px-4 py-2.5 text-right font-bold tabular-nums text-sky-300">{formatMiles(totNr, 0)}</td>
                             <td className="px-4 py-2.5 text-right font-bold tabular-nums text-rose-300">{formatMiles(totV, 0)}</td>
+                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-orange-400">{formatMiles(totDR, 0)}</td>
+                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-purple-400">{formatMiles(totDNr, 0)}</td>
                             <td className={`px-4 py-2.5 text-right font-bold tabular-nums ${totP <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{formatMiles(totP, 0)}</td>
                             <td />
                           </tr>
                         </>}
                       />
                       <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
-                        <p className="mb-4 text-sm font-medium text-gray-400">Compra vs Venta por mes (MWh)</p>
+                        <p className="mb-4 text-sm font-medium text-gray-400">Compra vs Venta vs Demanda por mes (kWh)</p>
                         <div className="h-64">
                           <ResponsiveContainer width="100%" height="100%">
-                            <BarChart data={wizResumenMensual.map(m => ({ mes: m.mes, compra: Math.round(m.compraRmwh + m.compraNrmwh), venta: Math.round(m.ventaMwh) }))} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+                            <BarChart data={wizResumenMensual.map(m => ({ mes: m.mes, compra: Math.round(m.compraRkwh + m.compraNrkwh), venta: Math.round(m.ventaKwh), demanda: Math.round(m.demandaRkwh + m.demandaNrkwh) }))} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
                               <CartesianGrid stroke="#374151" strokeDasharray="3 3" />
                               <XAxis dataKey="mes" stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 11 }} tickFormatter={v => formatMes(String(v)).slice(0,3)} />
                               <YAxis stroke="#9ca3af" tick={{ fill: '#9ca3af', fontSize: 11 }} />
-                              <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '8px', color: '#f3f4f6' }} labelFormatter={v => formatMes(String(v))} formatter={(v, n) => [`${formatMiles(Number(v), 0)} MWh`, n]} />
+                              <Tooltip contentStyle={{ backgroundColor: '#111827', border: '1px solid #374151', borderRadius: '8px', color: '#f3f4f6' }} labelFormatter={v => formatMes(String(v))} formatter={(v, n) => [`${formatMiles(Number(v), 0)} kWh`, n]} />
                               <Legend wrapperStyle={{ color: '#9ca3af', paddingTop: 8 }} />
-                              <Bar dataKey="compra" name="Compra" fill="#3b82f6" radius={[3,3,0,0]} />
-                              <Bar dataKey="venta"  name="Venta"  fill="#ef4444" radius={[3,3,0,0]} />
+                              <Bar dataKey="compra"  name="Compra"  fill="#3b82f6" radius={[3,3,0,0]} />
+                              <Bar dataKey="venta"   name="Venta"   fill="#ef4444" radius={[3,3,0,0]} />
+                              <Bar dataKey="demanda" name="Demanda" fill="#f97316" radius={[3,3,0,0]} />
                             </BarChart>
                           </ResponsiveContainer>
                         </div>
