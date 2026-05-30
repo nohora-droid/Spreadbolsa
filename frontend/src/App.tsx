@@ -823,7 +823,7 @@ function App() {
       copCompraR:  m.compra_r_mwh  * 1_000 * PRECIO_MOCK_COMPRA_R  / 1_000_000,
       copCompraNr: m.compra_nr_mwh * 1_000 * PRECIO_MOCK_COMPRA_NR / 1_000_000,
       copVenta:    m.venta_mwh     * 1_000 * PRECIO_MOCK_VENTA     / 1_000_000,
-      tipoPos:     m.posicion_neta_mwh <= 0 ? 'Vendedor' as const : 'Comprador' as const,
+      tipoPos:     m.posicion_neta_mwh > 0 ? 'Comprando en bolsa' : 'Vendiendo en bolsa',
     }))
   }, [wizPosicionMensual])
 
@@ -1774,12 +1774,16 @@ function App() {
 
             <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
               <MetricCard
-                label="Posición Neta (kWh)"
+                label={portfolioResumen
+                  ? (portfolioResumen.posicion_neta_total_kwh > 0
+                      ? 'Comprando en bolsa (kWh)'
+                      : 'Vendiendo en bolsa (kWh)')
+                  : 'Posición Neta (kWh)'}
                 value={portfolioResumen ? formatMiles(portfolioResumen.posicion_neta_total_kwh) : '—'}
                 accent={
-                  portfolioResumen && portfolioResumen.posicion_neta_total_kwh <= 0
-                    ? 'text-emerald-400'
-                    : 'text-red-400'
+                  portfolioResumen && portfolioResumen.posicion_neta_total_kwh > 0
+                    ? 'text-red-400'
+                    : 'text-emerald-400'
                 }
               />
               <MetricCard
@@ -2044,6 +2048,7 @@ function App() {
                       'Demanda R (kWh)',
                       'Demanda NR (kWh)',
                       'Posición Neta (kWh)',
+                      'Tipo Posición',
                     ]}
                     filas={
                       <>
@@ -2056,8 +2061,11 @@ function App() {
                             <td className="px-4 py-2.5 text-right tabular-nums text-rose-300">{formatMiles(fila.venta)}</td>
                             <td className="px-4 py-2.5 text-right tabular-nums text-orange-400">{formatMiles(fila.demandaR)}</td>
                             <td className="px-4 py-2.5 text-right tabular-nums text-purple-400">{formatMiles(fila.demandaNr)}</td>
-                            <td className={`px-4 py-2.5 text-right font-medium tabular-nums ${fila.posicionNeta <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            <td className={`px-4 py-2.5 text-right font-medium tabular-nums ${fila.posicionNeta > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
                               {formatMiles(fila.posicionNeta)}
+                            </td>
+                            <td className={`px-4 py-2.5 text-right text-xs font-semibold ${fila.posicionNeta > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                              {fila.posicionNeta > 0 ? 'Comprando en bolsa' : 'Vendiendo en bolsa'}
                             </td>
                           </tr>
                         ))}
@@ -2070,8 +2078,11 @@ function App() {
                             <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-rose-300">{formatMiles(portfolioTotalesFiltrados.venta)}</td>
                             <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-orange-400">{formatMiles(portfolioTotalesFiltrados.demandaR)}</td>
                             <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-purple-400">{formatMiles(portfolioTotalesFiltrados.demandaNr)}</td>
-                            <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${portfolioTotalesFiltrados.posicionNeta <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${portfolioTotalesFiltrados.posicionNeta > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
                               {formatMiles(portfolioTotalesFiltrados.posicionNeta)}
+                            </td>
+                            <td className={`px-4 py-2.5 text-right text-xs font-semibold ${portfolioTotalesFiltrados.posicionNeta > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                              {portfolioTotalesFiltrados.posicionNeta > 0 ? 'Comprando en bolsa' : 'Vendiendo en bolsa'}
                             </td>
                           </tr>
                         )}
@@ -2140,7 +2151,12 @@ function App() {
                         <MetricCard label="Compra total (kWh)" value={`${formatMiles(totR + totNr, 0)}`} subValue={`${formatMiles(totCR + totCNr, 1)} M COP`} accent="text-sky-400" />
                         <MetricCard label="Venta total (kWh)"  value={`${formatMiles(totV, 0)}`} subValue={`${formatMiles(totCV, 1)} M COP`} accent="text-rose-400" />
                         <MetricCard label="Posición neta (kWh)" value={`${formatMiles(totP, 0)}`} accent={totP <= 0 ? 'text-emerald-400' : 'text-red-400'} />
-                        <MetricCard label="Tipo dominante" value={`${nVend} de ${wizResumenMensual.length} meses vendedor`} accent="text-amber-400" />
+                        <MetricCard
+                          label="Posición dominante"
+                          value={nVend >= (wizResumenMensual.length - nVend) ? 'Vendiendo en bolsa' : 'Comprando en bolsa'}
+                          subValue={`${nVend} vend. / ${wizResumenMensual.length - nVend} comp.`}
+                          accent={nVend >= (wizResumenMensual.length - nVend) ? 'text-emerald-400' : 'text-red-400'}
+                        />
                       </div>
                       <TablaAnalisis
                         encabezados={['Mes','Compra R (kWh)','Compra NR (kWh)','Venta (kWh)','Demanda R (kWh)','Demanda NR (kWh)','Pos. Neta (kWh)','Tipo Posición']}
@@ -2154,7 +2170,7 @@ function App() {
                               <td className="px-4 py-2.5 text-right tabular-nums text-orange-400">{formatMiles(m.demandaRkwh, 0)}</td>
                               <td className="px-4 py-2.5 text-right tabular-nums text-purple-400">{formatMiles(m.demandaNrkwh, 0)}</td>
                               <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${m.posNetaKwh <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{formatMiles(m.posNetaKwh, 0)}</td>
-                              <td className={`px-4 py-2.5 text-right text-xs font-semibold ${m.tipoPos === 'Vendedor' ? 'text-emerald-400' : 'text-red-400'}`}>{m.tipoPos}</td>
+                              <td className={`px-4 py-2.5 text-right text-xs font-semibold ${m.posNetaKwh <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{m.tipoPos}</td>
                             </tr>
                           ))}
                           <tr className="border-t-2 border-gray-700 bg-gray-800/60">
@@ -2284,6 +2300,7 @@ function App() {
                 </section>
 
                 {wizPBResumenMensual.length > 0 && wizPBPromedioGlobal !== null && (() => {
+                  const totalTransaccionMcop = wizPBResumenMensual.reduce((s, m) => s + m.transaccionMcop, 0)
                   const spread = PRECIO_MOCK_COMPRA_R - wizPBPromedioGlobal
                   const semColor = spread > 5 ? 'text-emerald-400 border-emerald-500/40 bg-emerald-500/10' : spread > -5 ? 'text-amber-400 border-amber-500/40 bg-amber-500/10' : 'text-red-400 border-red-500/40 bg-red-500/10'
                   const semIcon  = spread > 5 ? '✓' : spread > -5 ? '⚠' : '✗'
@@ -2303,7 +2320,11 @@ function App() {
                         <MetricCard label="PB promedio escenario" value={`${formatNumero(wizPBPromedioGlobal)} COP/kWh`} accent="text-white" />
                         <MetricCard label="PPP contratos (mock)" value={`${PRECIO_MOCK_COMPRA_R} COP/kWh`} accent="text-amber-400" />
                         <MetricCard label="Spread promedio" value={`${spread >= 0 ? '+' : ''}${formatNumero(spread)} COP/kWh`} accent={spread >= 0 ? 'text-emerald-400' : 'text-red-400'} />
-                        <MetricCard label="Transacción bolsa total" value={`${formatMiles(wizPBResumenMensual.reduce((s, m) => s + m.transaccionMcop, 0), 2)} M COP`} accent={wizPBResumenMensual.reduce((s, m) => s + m.transaccionMcop, 0) <= 0 ? 'text-emerald-400' : 'text-red-400'} />
+                        <MetricCard
+                          label={totalTransaccionMcop > 0 ? 'Costo en bolsa (M COP)' : 'Ingreso en bolsa (M COP)'}
+                          value={`${formatMiles(totalTransaccionMcop, 2)} M COP`}
+                          accent={totalTransaccionMcop <= 0 ? 'text-emerald-400' : 'text-red-400'}
+                        />
                       </div>
                       <TablaAnalisis
                         encabezados={['Mes','PB Promedio (COP/kWh)','Posición Neta (MWh)','Trans. Bolsa (M COP)','Spread Contratos vs PB']}
@@ -2521,8 +2542,8 @@ function App() {
                       {por_mes.map(m => (
                         <tr key={m.mes} className="transition-colors hover:bg-gray-800/40">
                           <td className="px-4 py-2.5 font-medium text-gray-200">{m.mes}</td>
-                          <td className="px-4 py-2.5 text-right tabular-nums text-gray-300">{formatMiles(m.pos_actual_mwh)}</td>
-                          <td className="px-4 py-2.5 text-right tabular-nums text-blue-300">{formatMiles(m.pos_nueva_mwh)}</td>
+                          <td className={`px-4 py-2.5 text-right tabular-nums ${m.pos_actual_mwh > 0 ? 'text-red-400' : 'text-emerald-400'}`}>{formatMiles(m.pos_actual_mwh)}</td>
+                          <td className={`px-4 py-2.5 text-right tabular-nums ${m.pos_nueva_mwh > 0 ? 'text-red-400' : 'text-emerald-400'}`}>{formatMiles(m.pos_nueva_mwh)}</td>
                           <td className={`px-4 py-2.5 text-right font-medium tabular-nums ${m.diferencia_mwh <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{m.diferencia_mwh > 0 ? '+' : ''}{formatMiles(m.diferencia_mwh)}</td>
                           <td className="px-4 py-2.5 text-right tabular-nums text-gray-300">{formatMiles(m.costo_actual_mcop)}</td>
                           <td className="px-4 py-2.5 text-right tabular-nums text-blue-300">{formatMiles(m.costo_nuevo_mcop)}</td>
@@ -2552,6 +2573,30 @@ function App() {
                   <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-5 py-3">
                     <p className="text-xs font-semibold uppercase tracking-widest text-gray-400">Capítulo 4 — Conclusión y recomendación</p>
                   </div>
+                  {/* Narrativa de posición base de BIA */}
+                  {(() => {
+                    const posKwh = Math.abs(ra.posicion_neta_total_mwh * 1_000)
+                    const costoIngreso = Math.abs(ra.costo_bolsa_total_mcop)
+                    const esComprando = ra.posicion_neta_total_mwh > 0
+                    const narrativa = esComprando
+                      ? `BIA está comprando ${formatMiles(posKwh, 0)} kWh en bolsa a un costo estimado de ${formatMiles(costoIngreso, 2)} M COP con el escenario de PB seleccionado. Un contrato de compra a menos de ${formatNumero(pbProm)} COP/kWh reduciría este costo.`
+                      : `BIA está vendiendo ${formatMiles(posKwh, 0)} kWh en bolsa generando un ingreso estimado de ${formatMiles(costoIngreso, 2)} M COP con el escenario de PB seleccionado. Un contrato de venta a más de ${formatNumero(pbProm)} COP/kWh aumentaría este ingreso.`
+                    return (
+                      <div className={`rounded-xl border px-5 py-4 ${esComprando ? 'border-red-500/30 bg-red-950/20' : 'border-emerald-500/30 bg-emerald-950/20'}`}>
+                        <div className="flex items-start gap-3">
+                          <span className={`shrink-0 text-lg font-bold ${esComprando ? 'text-red-400' : 'text-emerald-400'}`}>
+                            {esComprando ? '↑' : '↓'}
+                          </span>
+                          <div>
+                            <p className={`mb-1 text-xs font-semibold uppercase tracking-wider ${esComprando ? 'text-red-400' : 'text-emerald-400'}`}>
+                              {esComprando ? 'Comprando en bolsa' : 'Vendiendo en bolsa'}
+                            </p>
+                            <p className="text-sm text-gray-300 leading-relaxed">{narrativa}</p>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })()}
                   <div className={`rounded-xl border px-5 py-4 ${sem.border}`}>
                     <div className="flex items-start gap-4">
                       <span className={`text-3xl font-bold ${sem.color}`}>{sem.icon}</span>
