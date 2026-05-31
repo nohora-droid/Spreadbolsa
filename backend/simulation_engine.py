@@ -260,12 +260,9 @@ def simular_contrato(
 
         try:
             # ── 2a. Posición neta ACTUAL del inventario para este día ─────────
-            # calcular_posicion_neta determina automáticamente el tipo_dia
-            # (ordinario / sábado / domingo / festivo) y aplica:
-            #   compra_r[h] = TO[mes][h] + inventario_tipo_dia[mes][h]
-            #   compra_nr[h] = NR[mes][h]
-            #   venta[h] = venta[mes][h]
-            #   posicion_neta[h] = compra_r + compra_nr - venta
+            # La posición neta viene calculada por cargar_posicion_olibia():
+            #   posicion_neta[h] = venta[h] − (compra_r[h] + compra_nr[h])
+            # Positivo → BIA compra en bolsa; Negativo → BIA vende en bolsa.
             df_pos_antes = calcular_posicion_neta(inventario, fecha_str)
 
             # ── 2b. Costo de bolsa ANTES del nuevo contrato ───────────────────
@@ -307,10 +304,12 @@ def simular_contrato(
                 df_pos_nueva["venta_kwh"] += delta_values
 
             # Recalcular posición neta con el nuevo contrato incluido.
+            # Fórmula: venta − (compra_r + compra_nr)
+            # Positivo → BIA compra en bolsa; Negativo → BIA vende en bolsa.
             df_pos_nueva["posicion_neta_kwh"] = (
-                df_pos_nueva["compra_r_kwh"]
-                + df_pos_nueva["compra_nr_kwh"]
-                - df_pos_nueva["venta_kwh"]
+                df_pos_nueva["venta_kwh"]
+                - df_pos_nueva["compra_r_kwh"]
+                - df_pos_nueva["compra_nr_kwh"]
             )
 
             # ── 2e. Costo de bolsa DESPUÉS, con el mismo perfil del escenario ─

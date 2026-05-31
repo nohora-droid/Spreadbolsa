@@ -391,7 +391,9 @@ def cargar_posicion_olibia(start_date: str, end_date: str) -> pd.DataFrame:
         compra_r_kwh      : kWh compra regulado (suma de contratos R)
         compra_nr_kwh     : kWh compra no regulado (suma de contratos NR)
         venta_kwh         : kWh venta (valor absoluto; positivo)
-        posicion_neta_kwh : compra_r + compra_nr − venta
+        posicion_neta_kwh : (venta) − (compra_r + compra_nr)
+                            Positivo → BIA debe comprar en bolsa.
+                            Negativo → BIA tiene exceso para vender en bolsa.
 
     Clasificación de contratos:
         operation="Compra" + market_type="REGULADO"    → compra_r_kwh
@@ -491,11 +493,13 @@ def cargar_posicion_olibia(start_date: str, end_date: str) -> pd.DataFrame:
         else:
             df_pos[col] = df_pos[col].fillna(0.0)
 
-    # Posición neta = compra_r + compra_nr − venta
+    # Posición neta en bolsa = (venta) − (compra_r + compra_nr)
+    # Positivo → BIA necesita comprar en bolsa (compromisos de venta > compras de contratos)
+    # Negativo → BIA tiene exceso para vender en bolsa (compras > compromisos de venta)
     df_pos["posicion_neta_kwh"] = (
-        df_pos["compra_r_kwh"]
-        + df_pos["compra_nr_kwh"]
-        - df_pos["venta_kwh"]
+        df_pos["venta_kwh"]
+        - df_pos["compra_r_kwh"]
+        - df_pos["compra_nr_kwh"]
     )
 
     df_pos = df_pos.sort_values(["date", "hour"]).reset_index(drop=True)
@@ -654,9 +658,11 @@ def cargar_posicion_con_demanda(start_date: str, end_date: str) -> pd.DataFrame:
                demanda_r  = card9440[tipo_dia][hora]
                demanda_nr = card9439[tipo_dia][hora]
 
-    Fórmula de posición neta (actualizada):
-        posicion_neta_kwh = compra_r + compra_nr − venta
-                            − demanda_r − demanda_nr
+    Fórmula de posición neta en bolsa:
+        posicion_neta_kwh = (venta + demanda_r + demanda_nr)
+                            − (compra_r + compra_nr)
+        Positivo → BIA debe comprar en bolsa (compromisos > compras de contratos).
+        Negativo → BIA tiene exceso para vender en bolsa (compras > compromisos).
 
     Parámetros:
         start_date : Fecha inicio YYYY-MM-DD (inclusive).
@@ -751,14 +757,20 @@ def cargar_posicion_con_demanda(start_date: str, end_date: str) -> pd.DataFrame:
         df_pos["demanda_nr_kwh"] = 0.0
 
     # ── 4. Recalcular posicion_neta incluyendo demanda de usuarios finales ─────
-    # Fórmula: contratos (compra − venta) menos lo que efectivamente consumen
-    # los clientes, que representa energía ya comprometida a ellos (no en bolsa).
+    # Fórmula: (venta + demanda_r + demanda_nr) − (compra_r + compra_nr)
+    #   venta      : energía comprometida a contraparte vía contratos de venta
+    #   demanda_r  : consumo de clientes regulados
+    #   demanda_nr : consumo de clientes no regulados
+    #   compra_r   : energía comprada de generadores (mercado regulado)
+    #   compra_nr  : energía comprada de generadores (mercado no regulado)
+    # Positivo → compromisos superan compras → BIA debe comprar en bolsa.
+    # Negativo → compras superan compromisos → BIA tiene exceso para vender en bolsa.
     df_pos["posicion_neta_kwh"] = (
-        df_pos["compra_r_kwh"]
-        + df_pos["compra_nr_kwh"]
-        - df_pos["venta_kwh"]
-        - df_pos["demanda_r_kwh"]
-        - df_pos["demanda_nr_kwh"]
+        df_pos["venta_kwh"]
+        + df_pos["demanda_r_kwh"]
+        + df_pos["demanda_nr_kwh"]
+        - df_pos["compra_r_kwh"]
+        - df_pos["compra_nr_kwh"]
     )
 
     return df_pos
