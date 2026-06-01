@@ -90,7 +90,15 @@ app.add_middleware(
 METABASE_DATABASE_PB = 2344
 
 
-# ── Healthcheck — Railway lo sondea para verificar que el contenedor está vivo ─
+# ── Raíz — evita 404 en "/" que hace que Render/Railway apague el servicio ────
+
+@app.get("/")
+def root():
+    """Endpoint raíz para plataformas que sondean '/' como healthcheck (Render, etc.)."""
+    return {"status": "ok", "app": "Spread Bolsa BIA", "version": "1.0"}
+
+
+# ── Healthcheck explícito — Railway lo sondea para verificar que el contenedor está vivo ─
 
 @app.get("/health")
 def health():
