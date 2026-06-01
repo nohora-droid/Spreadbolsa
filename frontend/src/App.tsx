@@ -480,7 +480,7 @@ function App() {
   const [tabActiva, setTabActiva] = useState<DashboardTab>('spread')
   const [posicion, setPosicion] = useState<'vendedor' | 'comprador'>('vendedor')
   const [precioContrato, setPrecioContrato] = useState(350)
-  const [fechaInicio, setFechaInicio] = useState('2026-01-01')
+  const [fechaInicio, setFechaInicio] = useState('2024-01-01')
   const [fechaFin, setFechaFin] = useState(
     () => new Date().toISOString().split('T')[0],
   )
@@ -708,7 +708,7 @@ function App() {
 
   useEffect(() => {
     const controller = new AbortController()
-    cargarSpread(350, '2026-01-01', new Date().toISOString().split('T')[0], {
+    cargarSpread(350, '2024-01-01', new Date().toISOString().split('T')[0], {
       inicial: true,
       signal: controller.signal,
     })
