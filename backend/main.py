@@ -586,8 +586,8 @@ class ContratoSimulacion(BaseModel):
         "plano",
         description="'plano' | 'bloques' | 'solar' | 'excel'",
     )
-    # Energía total en MWh/mes (requerida para plano y solar)
-    energia_mensual_mwh: Optional[float] = Field(None, gt=0, description="Energía en MWh/mes")
+    # Energía total en kWh/mes (requerida para plano y solar)
+    energia_mensual_kwh: Optional[float] = Field(None, gt=0, description="Energía en kWh/mes")
     # Para perfil 'bloques': lista de bloques horarios
     bloques: Optional[List[BloqueHorario]] = Field(None, description="Bloques horarios para perfil 'bloques'")
     # Para perfil 'custom' (legacy): 24 pesos relativos
@@ -703,7 +703,7 @@ def simulate(contrato: ContratoSimulacion):
             contrato_fin=contrato.contrato_fin,
             tipo_mercado=contrato.tipo_mercado,
             perfil_horario=contrato.perfil_horario,
-            energia_mensual_mwh=contrato.energia_mensual_mwh,
+            energia_mensual_kwh=contrato.energia_mensual_kwh,
             bloques=bloques_dict,
             perfil_pesos_24h=contrato.perfil_pesos_24h,
             perfil_excel_12x24=contrato.perfil_excel_12x24,

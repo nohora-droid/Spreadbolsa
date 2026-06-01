@@ -173,7 +173,7 @@ def simular_contrato(
     contrato_fin: str,
     tipo_mercado: str,
     perfil_horario: str,
-    energia_mensual_mwh: float | None = None,
+    energia_mensual_kwh: float | None = None,
     bloques: list[dict] | None = None,
     perfil_pesos_24h: list[float] | None = None,
     perfil_excel_12x24: list[list[float]] | None = None,
@@ -192,7 +192,7 @@ def simular_contrato(
     contrato_inicio / contrato_fin : vigencia del contrato simulado.
     tipo_mercado        : 'regulado', 'no_regulado' o 'ambos'.
     perfil_horario      : 'plano', 'bloques', 'solar' o 'excel'.
-    energia_mensual_mwh : energía mensual en MWh/mes (para perfiles plano/solar).
+    energia_mensual_kwh : energía mensual en kWh/mes (para perfiles plano/solar).
     bloques             : lista de dicts {hora_ini, hora_fin, mwh_mes}.
     perfil_pesos_24h    : 24 pesos relativos normalizados.
     perfil_excel_12x24  : matriz 12×24 de kWh/mes por hora.
@@ -204,7 +204,7 @@ def simular_contrato(
       perfil_horario (24h promedio), por_mes (tabla meses del contrato),
       perfil_pb_escenario (24 valores del vector PB usado).
     """
-    energia_mensual_kwh = (energia_mensual_mwh or 0.0) * 1_000.0
+    energia_mensual_kwh = energia_mensual_kwh or 0.0  # ya viene en kWh, sin conversión
 
     # ═══════════════════════════════════════════════════════════════════════════
     # PASO 1 — Calcular el perfil horario promedio del escenario de PB
@@ -451,7 +451,7 @@ def simular_contrato(
     # ── Log informativo ───────────────────────────────────────────────────────
     print(
         f"[simulate] tipo={tipo} mercado={tipo_mercado} perfil={perfil_horario} "
-        f"energia={energia_mensual_mwh}MWh/mes "
+        f"energia={energia_mensual_kwh}kWh/mes "
         f"escenario_pb={pb_desde}..{pb_hasta} "
         f"contrato={contrato_inicio}..{contrato_fin} "
         f"dias_procesados={df_antes['fecha'].nunique()} "

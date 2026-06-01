@@ -532,7 +532,7 @@ function App() {
   const [wizSimContraparte, setWizSimContraparte] = useState('')
   const [wizSimPrecio,      setWizSimPrecio]      = useState(350)
   const [wizSimPerfilTipo,  setWizSimPerfilTipo]  = useState<SimPerfilTipo>('plano')
-  const [wizSimEnergiaMwh,  setWizSimEnergiaMwh]  = useState(1000)
+  const [wizSimEnergiaKwh,  setWizSimEnergiaKwh]  = useState(1000)
   const [wizSimBloques,     setWizSimBloques]     = useState<SimBloque[]>([{ horaInicio: 8, horaFin: 17, mwhMes: 1000 }])
   const [wizSimExcel12x24,  setWizSimExcel12x24]  = useState<number[][] | null>(null)
   const [wizSimExcelNombre, setWizSimExcelNombre] = useState('')
@@ -796,9 +796,9 @@ function App() {
 
   async function wizSimular() {
     setWizSimCargando(true); setWizSimError(null)
-    type SimBody = { tipo: string; contraparte: string; precio_cop_kwh: number; pb_desde: string; pb_hasta: string; contrato_inicio: string; contrato_fin: string; tipo_mercado: string; perfil_horario: string; energia_mensual_mwh?: number; bloques?: { hora_ini: number; hora_fin: number; mwh_mes: number }[]; perfil_excel_12x24?: number[][] }
+    type SimBody = { tipo: string; contraparte: string; precio_cop_kwh: number; pb_desde: string; pb_hasta: string; contrato_inicio: string; contrato_fin: string; tipo_mercado: string; perfil_horario: string; energia_mensual_kwh?: number; bloques?: { hora_ini: number; hora_fin: number; mwh_mes: number }[]; perfil_excel_12x24?: number[][] }
     const body: SimBody = { tipo: wizSimTipo, contraparte: wizSimContraparte, precio_cop_kwh: wizSimPrecio, pb_desde: wizPBDesde, pb_hasta: wizPBHasta, contrato_inicio: wizContratoInicio, contrato_fin: wizContratoFin, tipo_mercado: wizSimTipoMercado, perfil_horario: wizSimPerfilTipo === 'excel' ? 'excel' : wizSimPerfilTipo }
-    if (wizSimPerfilTipo === 'plano' || wizSimPerfilTipo === 'solar') body.energia_mensual_mwh = wizSimEnergiaMwh
+    if (wizSimPerfilTipo === 'plano' || wizSimPerfilTipo === 'solar') body.energia_mensual_kwh = wizSimEnergiaKwh
     else if (wizSimPerfilTipo === 'bloques') body.bloques = wizSimBloques.map(b => ({ hora_ini: b.horaInicio, hora_fin: b.horaFin, mwh_mes: b.mwhMes }))
     else if (wizSimPerfilTipo === 'excel' && wizSimExcel12x24) body.perfil_excel_12x24 = wizSimExcel12x24
     try {
@@ -2562,8 +2562,8 @@ function App() {
                     <div className="mt-3">
                       {(wizSimPerfilTipo === 'plano' || wizSimPerfilTipo === 'solar') && (
                         <div>
-                          <label className="mb-1 block text-xs text-gray-500">Energía mensual (MWh/mes)</label>
-                          <input type="number" min={1} value={wizSimEnergiaMwh} onChange={e => setWizSimEnergiaMwh(Math.max(1, Number(e.target.value) || 1))}
+                          <label className="mb-1 block text-xs text-gray-500">Energía mensual (kWh/mes)</label>
+                          <input type="number" min={1} value={wizSimEnergiaKwh} onChange={e => setWizSimEnergiaKwh(Math.max(1, Number(e.target.value) || 1))}
                             className="w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 outline-none focus:border-emerald-500/50" />
                           {wizSimPerfilTipo === 'solar' && <p className="mt-1 text-xs text-gray-600">Curva solar: 0 en H1-H6 y H19-H24 · sube H7-H12 · baja H13-H18</p>}
                         </div>
@@ -2697,7 +2697,7 @@ function App() {
                     <MetricCard label="Δ Posición Neta (MWh)" value={`${rd.posicion_neta_total_mwh - ra.posicion_neta_total_mwh >= 0 ? '+' : ''}${formatMiles(rd.posicion_neta_total_mwh - ra.posicion_neta_total_mwh, 0)}`} accent="text-white" />
                     <MetricCard label="Δ Costo Bolsa (M COP)" value={`${delta_costo_mcop >= 0 ? '+' : ''}${formatMiles(delta_costo_mcop, 2)}`} accent={delta_costo_mcop < 0 ? 'text-emerald-400' : 'text-red-400'} />
                     <MetricCard label="Spread nuevo vs PB" value={`${spreadNuevo >= 0 ? '+' : ''}${formatNumero(spreadNuevo)} COP/kWh`} accent={spreadNuevo >= 0 ? 'text-emerald-400' : 'text-red-400'} />
-                    <MetricCard label="Energía contrato" value={`${formatMiles(wizSimPerfilTipo === 'bloques' ? wizSimBloques.reduce((s,b)=>s+b.mwhMes,0) : wizSimEnergiaMwh, 0)} MWh/mes`} accent="text-sky-400" />
+                    <MetricCard label="Energía contrato" value={`${formatMiles(wizSimPerfilTipo === 'bloques' ? wizSimBloques.reduce((s,b)=>s+b.mwhMes,0) : wizSimEnergiaKwh, 0)} kWh/mes`} accent="text-sky-400" />
                   </div>
                   <TablaAnalisis
                     encabezados={['Mes','Pos. Actual (MWh)','Pos. Nueva (MWh)','Δ (MWh)','Costo Actual (M COP)','Costo Nuevo (M COP)','Ahorro (M COP)']}
