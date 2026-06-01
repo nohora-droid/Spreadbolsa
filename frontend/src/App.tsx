@@ -13,11 +13,16 @@ import {
   YAxis,
 } from 'recharts'
 
-const API_BASE     = 'http://127.0.0.1:8000/spread'
-const API_PORTFOLIO = 'http://127.0.0.1:8000/portfolio'
-const API_POSICION  = 'http://127.0.0.1:8000/portfolio/posicion'
-const API_SIMULATE  = 'http://127.0.0.1:8000/simulate'
-const API_PPP       = 'http://127.0.0.1:8000/contratos/ppp'
+// URL base de la API:
+//   - Desarrollo local : http://127.0.0.1:8000  (Uvicorn corriendo en tu máquina)
+//   - Producción       : VITE_API_URL definida en Vercel (apunta al servicio Railway)
+const API_URL       = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+
+const API_BASE      = `${API_URL}/spread`
+const API_PORTFOLIO = `${API_URL}/portfolio`
+const API_POSICION  = `${API_URL}/portfolio/posicion`
+const API_SIMULATE  = `${API_URL}/simulate`
+const API_PPP       = `${API_URL}/contratos/ppp`
 
 const MESES_ES = [
   'Enero',

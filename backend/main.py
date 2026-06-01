@@ -14,6 +14,8 @@ from datetime import date, datetime, timedelta
 
 
 
+import os
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -53,20 +55,32 @@ app = FastAPI()
 
 
 
-# Habilita CORS para todos los orígenes (útil para desarrollo).
+# ── CORS ──────────────────────────────────────────────────────────────────────
+# En desarrollo acepta localhost:5173 (Vite dev server).
+# En producción Railway lee FRONTEND_URL desde las variables de entorno de Railway
+# y lo añade a la lista de orígenes permitidos.
+# Si FRONTEND_URL no está definida se usa "*" como fallback (solo en desarrollo).
+
+_frontend_url = os.getenv("FRONTEND_URL", "")
+
+_allowed_origins: list[str] = [
+    "http://localhost:5173",   # Vite dev server local
+    "http://127.0.0.1:5173",  # alternativa localhost
+]
+
+if _frontend_url:
+    # Agrega el dominio de Vercel configurado en Railway
+    _allowed_origins.append(_frontend_url)
+else:
+    # Sin FRONTEND_URL definida → acepta cualquier origen (solo útil en desarrollo)
+    _allowed_origins = ["*"]
 
 app.add_middleware(
-
     CORSMiddleware,
-
-    allow_origins=["*"],
-
+    allow_origins=_allowed_origins,
     allow_credentials=True,
-
     allow_methods=["*"],
-
     allow_headers=["*"],
-
 )
 
 
@@ -74,6 +88,14 @@ app.add_middleware(
 # ID de la base de datos en Metabase para consultas SQL nativas (price_pb_hourly).
 
 METABASE_DATABASE_PB = 2344
+
+
+# ── Healthcheck — Railway lo sondea para verificar que el contenedor está vivo ─
+
+@app.get("/health")
+def health():
+    """Endpoint de salud para Railway healthcheck."""
+    return {"status": "ok"}
 
 
 
