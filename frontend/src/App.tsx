@@ -1079,6 +1079,7 @@ function App() {
         const demandaR    = filas.reduce((s, f) => s + f.demanda_r,    0)
         const demandaNr   = filas.reduce((s, f) => s + f.demanda_nr,   0)
         const posicionNeta= filas.reduce((s, f) => s + f.posicion_neta, 0)
+        const costoBolsa  = filas.reduce((s, f) => s + f.costo_bolsa,  0) / 1_000_000 // en M COP
         // Usar tipo_dia del dato (ya clasificado por el backend); fallback local
         const tipoDiaRaw  = filas[0]?.tipo_dia ?? ''
         const tipoDia = tipoDiaRaw === 'ordinario' ? 'Ordinario'
@@ -1086,7 +1087,7 @@ function App() {
                       : tipoDiaRaw === 'domingo'   ? 'Domingo'
                       : tipoDiaRaw === 'festivo'   ? 'Festivo'
                       : tipoDiaDesdefecha(fecha)
-        return { fecha, tipoDia, compraR, compraNr, venta, demandaR, demandaNr, posicionNeta }
+        return { fecha, tipoDia, compraR, compraNr, venta, demandaR, demandaNr, posicionNeta, costoBolsa }
       })
       .sort((a, b) => a.fecha.localeCompare(b.fecha))
   }, [portfolioDatos])
@@ -1116,8 +1117,9 @@ function App() {
         demandaR:     acc.demandaR     + f.demandaR,
         demandaNr:    acc.demandaNr    + f.demandaNr,
         posicionNeta: acc.posicionNeta + f.posicionNeta,
+        costoBolsa:   acc.costoBolsa   + f.costoBolsa,
       }),
-      { compraR: 0, compraNr: 0, venta: 0, demandaR: 0, demandaNr: 0, posicionNeta: 0 },
+      { compraR: 0, compraNr: 0, venta: 0, demandaR: 0, demandaNr: 0, posicionNeta: 0, costoBolsa: 0 },
     )
   }, [portfolioResumenDiarioFiltrado])
 
@@ -2129,6 +2131,7 @@ function App() {
                       'Demanda R (kWh)',
                       'Demanda NR (kWh)',
                       'Posición Neta (kWh)',
+                      'Costo Bolsa (M COP)',
                       'Tipo Posición',
                     ]}
                     filas={
@@ -2145,28 +2148,34 @@ function App() {
                             <td className={`px-4 py-2.5 text-right font-medium tabular-nums ${fila.posicionNeta > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
                               {formatMiles(fila.posicionNeta)}
                             </td>
+                            <td className="px-4 py-2.5 text-right tabular-nums text-yellow-300">{formatMiles(fila.costoBolsa, 2)}</td>
                             <td className={`px-4 py-2.5 text-right text-xs font-semibold ${fila.posicionNeta > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
                               {fila.posicionNeta > 0 ? 'Comprando en bolsa' : 'Vendiendo en bolsa'}
                             </td>
                           </tr>
                         ))}
-                        {portfolioTotalesFiltrados && (
-                          <tr className="border-t-2 border-gray-700 bg-gray-800/60">
-                            <td className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-gray-400">TOTAL</td>
-                            <td className="px-4 py-2.5" />
-                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-sky-300">{formatMiles(portfolioTotalesFiltrados.compraR)}</td>
-                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-emerald-300">{formatMiles(portfolioTotalesFiltrados.compraNr)}</td>
-                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-rose-300">{formatMiles(portfolioTotalesFiltrados.venta)}</td>
-                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-orange-400">{formatMiles(portfolioTotalesFiltrados.demandaR)}</td>
-                            <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-purple-400">{formatMiles(portfolioTotalesFiltrados.demandaNr)}</td>
-                            <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${portfolioTotalesFiltrados.posicionNeta > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
-                              {formatMiles(portfolioTotalesFiltrados.posicionNeta)}
-                            </td>
-                            <td className={`px-4 py-2.5 text-right text-xs font-semibold ${portfolioTotalesFiltrados.posicionNeta > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
-                              {portfolioTotalesFiltrados.posicionNeta > 0 ? 'Comprando en bolsa' : 'Vendiendo en bolsa'}
-                            </td>
-                          </tr>
-                        )}
+                        {portfolioTotalesFiltrados && (() => {
+                          const nComp = portfolioResumenDiarioFiltrado.filter(f => f.posicionNeta > 0).length
+                          const nVend = portfolioResumenDiarioFiltrado.filter(f => f.posicionNeta <= 0).length
+                          return (
+                            <tr className="border-t-2 border-gray-600 bg-gray-700">
+                              <td className="px-4 py-2.5 text-xs font-bold uppercase tracking-wider text-white">TOTAL PERÍODO</td>
+                              <td className="px-4 py-2.5" />
+                              <td className="px-4 py-2.5 text-right font-bold tabular-nums text-white">{formatMiles(portfolioTotalesFiltrados.compraR)}</td>
+                              <td className="px-4 py-2.5 text-right font-bold tabular-nums text-white">{formatMiles(portfolioTotalesFiltrados.compraNr)}</td>
+                              <td className="px-4 py-2.5 text-right font-bold tabular-nums text-white">{formatMiles(portfolioTotalesFiltrados.venta)}</td>
+                              <td className="px-4 py-2.5 text-right font-bold tabular-nums text-white">{formatMiles(portfolioTotalesFiltrados.demandaR)}</td>
+                              <td className="px-4 py-2.5 text-right font-bold tabular-nums text-white">{formatMiles(portfolioTotalesFiltrados.demandaNr)}</td>
+                              <td className={`px-4 py-2.5 text-right font-bold tabular-nums ${portfolioTotalesFiltrados.posicionNeta > 0 ? 'text-red-300' : 'text-emerald-300'}`}>
+                                {formatMiles(portfolioTotalesFiltrados.posicionNeta)}
+                              </td>
+                              <td className="px-4 py-2.5 text-right font-bold tabular-nums text-white">{formatMiles(portfolioTotalesFiltrados.costoBolsa, 2)}</td>
+                              <td className="px-4 py-2.5 text-right text-xs font-bold text-white">
+                                {nComp} días comp. / {nVend} días vend.
+                              </td>
+                            </tr>
+                          )
+                        })()}
                       </>
                     }
                   />
@@ -2263,15 +2272,17 @@ function App() {
                               <td className={`px-4 py-2.5 text-right text-xs font-semibold ${m.posNetaKwh <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{m.tipoPos}</td>
                             </tr>
                           ))}
-                          <tr className="border-t-2 border-gray-700 bg-gray-800/60">
-                            <td className="px-4 py-2.5 text-xs font-bold uppercase tracking-wider text-gray-400">TOTAL</td>
-                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-sky-300">{formatMiles(totR, 0)}</td>
-                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-sky-300">{formatMiles(totNr, 0)}</td>
-                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-rose-300">{formatMiles(totV, 0)}</td>
-                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-orange-400">{formatMiles(totDR, 0)}</td>
-                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-purple-400">{formatMiles(totDNr, 0)}</td>
-                            <td className={`px-4 py-2.5 text-right font-bold tabular-nums ${totP <= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{formatMiles(totP, 0)}</td>
-                            <td />
+                          <tr className="border-t-2 border-gray-600 bg-gray-700">
+                            <td className="px-4 py-2.5 text-xs font-bold uppercase tracking-wider text-white">TOTAL PERÍODO</td>
+                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-white">{formatMiles(totR, 0)}</td>
+                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-white">{formatMiles(totNr, 0)}</td>
+                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-white">{formatMiles(totV, 0)}</td>
+                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-white">{formatMiles(totDR, 0)}</td>
+                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-white">{formatMiles(totDNr, 0)}</td>
+                            <td className={`px-4 py-2.5 text-right font-bold tabular-nums ${totP <= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{formatMiles(totP, 0)}</td>
+                            <td className="px-4 py-2.5 text-right text-xs font-bold text-white">
+                              {wizResumenMensual.length - nVend} meses comp. / {nVend} meses vend.
+                            </td>
                           </tr>
                         </>}
                       />
@@ -2702,6 +2713,25 @@ function App() {
                           <td className={`px-4 py-2.5 text-right font-semibold tabular-nums ${m.ahorro_mcop >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{m.ahorro_mcop > 0 ? '+' : ''}{formatMiles(m.ahorro_mcop)}</td>
                         </tr>
                       ))}
+                      {(() => {
+                        const totPosActual   = por_mes.reduce((s, m) => s + m.pos_actual_mwh,    0)
+                        const totPosNueva    = por_mes.reduce((s, m) => s + m.pos_nueva_mwh,     0)
+                        const totDiff        = por_mes.reduce((s, m) => s + m.diferencia_mwh,    0)
+                        const totCostoActual = por_mes.reduce((s, m) => s + m.costo_actual_mcop, 0)
+                        const totCostoNuevo  = por_mes.reduce((s, m) => s + m.costo_nuevo_mcop,  0)
+                        const totAhorro      = por_mes.reduce((s, m) => s + m.ahorro_mcop,       0)
+                        return (
+                          <tr className="border-t-2 border-gray-600 bg-gray-700">
+                            <td className="px-4 py-2.5 text-xs font-bold uppercase tracking-wider text-white">TOTAL PERÍODO</td>
+                            <td className={`px-4 py-2.5 text-right font-bold tabular-nums ${totPosActual > 0 ? 'text-red-300' : 'text-emerald-300'}`}>{formatMiles(totPosActual)}</td>
+                            <td className={`px-4 py-2.5 text-right font-bold tabular-nums ${totPosNueva > 0 ? 'text-red-300' : 'text-emerald-300'}`}>{formatMiles(totPosNueva)}</td>
+                            <td className={`px-4 py-2.5 text-right font-bold tabular-nums ${totDiff <= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{totDiff > 0 ? '+' : ''}{formatMiles(totDiff)}</td>
+                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-white">{formatMiles(totCostoActual)}</td>
+                            <td className="px-4 py-2.5 text-right font-bold tabular-nums text-white">{formatMiles(totCostoNuevo)}</td>
+                            <td className={`px-4 py-2.5 text-right font-bold tabular-nums ${totAhorro >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>{totAhorro > 0 ? '+' : ''}{formatMiles(totAhorro)}</td>
+                          </tr>
+                        )
+                      })()}
                     </>}
                   />
                   <div className="rounded-xl border border-gray-800 bg-gray-900/60 p-5">
